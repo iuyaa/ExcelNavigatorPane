@@ -162,13 +162,10 @@ namespace ExcelNavigatorPane
                     _lastActiveWorkbookName = activeName;
                 }
 
-                if (!string.IsNullOrEmpty(_pendingWorkbookActivationName))
+                if (!string.IsNullOrEmpty(_pendingWorkbookActivationName) && (!pendingFound || string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase)))
                 {
-                    if (!pendingFound || string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase))
-                    {
-                        _pendingWorkbookActivationName = null;
-                        _pendingWorkbookActivationAt = null;
-                    }
+                    _pendingWorkbookActivationName = null;
+                    _pendingWorkbookActivationAt = null;
                 }
             }
             catch
