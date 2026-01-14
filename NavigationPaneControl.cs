@@ -1,0 +1,613 @@
+﻿using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Drawing;
+using System.Linq;
+using System.Windows.Forms;
+using Excel = Microsoft.Office.Interop.Excel;
+
+namespace ExcelNavigatorPane
+{
+    public class NavigationPaneControl : UserControl
+    {
+        private Excel.Application _app;
+
+        private SplitContainer _split;
+
+        private ToolStrip _wbToolStrip;
+        private ToolStripButton _btnViewToggle; // placeholder
+        private ToolStripButton _btnSortAZ;
+        private ToolStripButton _btnSortZA;
+        private ToolStripButton _btnRefresh;
+        private ToolStripButton _btnHelp;
+
+        private DataGridView _gridWorkbooks;
+
+        private Panel _wsTopPanel;
+        private TextBox _txtFilter;
+        private Label _lblFilter;
+        private Label _lblCounts;
+        private Button _btnToggleHidden; // new button
+        private DataGridView _gridWorksheets;
+
+        private bool _sortAsc = true;
+        private Font _boldFont;
+
+        private HashSet<string> _hiddenSnapshot = new HashSet<string>(StringComparer.CurrentCultureIgnoreCase);
+        private bool _hiddenApplied = true; // indicates current workbook sheets are in hidden state from snapshot
+
+        private Image _iconVisible;
+        private Image _iconHidden;
+        private Image _iconVeryHidden;
+
+        public NavigationPaneControl()
+        {
+            InitializeComponents();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                if (_boldFont != null) _boldFont.Dispose();
+                _iconVisible?.Dispose();
+                _iconHidden?.Dispose();
+                _iconVeryHidden?.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        public void Initialize(Excel.Application app)
+        {
+            _app = app ?? throw new ArgumentNullException(nameof(app));
+            _boldFont = new Font(this.Font, FontStyle.Bold);
+
+            // simple built-in icons using drawing (avoid resources)
+            _iconVisible = CreateCircleIcon(Color.SeaGreen);
+            _iconHidden = CreateCircleIcon(Color.Gray);
+            _iconVeryHidden = CreateLockIcon();
+
+            RefreshWorkbooks();
+            RefreshWorksheets();
+        }
+
+        public void RefreshAll(Excel.Workbook activeWorkbook = null)
+        {
+            RefreshWorkbooks(activeWorkbook);
+            RefreshWorksheets(activeWorkbook);
+        }
+
+        public void RefreshWorkbooks(Excel.Workbook activeWorkbook = null)
+        {
+            if (_app == null) return;
+            try
+            {
+                var books = _app.Workbooks.Cast<Excel.Workbook>().ToList();
+                if (_sortAsc)
+                    books = books.OrderBy(b => b.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
+                else
+                    books = books.OrderByDescending(b => b.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
+
+                _gridWorkbooks.SuspendLayout();
+                _gridWorkbooks.Rows.Clear();
+
+                string activeName = null;
+                try 
+                { 
+                    if (activeWorkbook != null)
+                        activeName = activeWorkbook.Name;
+                    else
+                        activeName = _app.ActiveWorkbook?.Name; 
+                } 
+                catch { /* ignore */ }
+
+                int rowIndexToSelect = -1;
+
+                foreach (var wb in books)
+                {
+                    int rowIndex = _gridWorkbooks.Rows.Add(wb.Name, null);
+                    var row = _gridWorkbooks.Rows[rowIndex];
+                    bool isActive = !string.IsNullOrEmpty(activeName) && string.Equals(wb.Name, activeName, StringComparison.CurrentCultureIgnoreCase);
+                    
+                    if (isActive)
+                    {
+                        row.DefaultCellStyle.BackColor = Color.Honeydew; // light green
+                        rowIndexToSelect = rowIndex;
+                    }
+                    else
+                    {
+                        row.DefaultCellStyle.BackColor = Color.White;
+                    }
+                }
+
+                if (rowIndexToSelect >= 0)
+                {
+                    _gridWorkbooks.CurrentCell = _gridWorkbooks.Rows[rowIndexToSelect].Cells["WbName"];
+                    _gridWorkbooks.Rows[rowIndexToSelect].Selected = true;
+                }
+                else
+                {
+                    _gridWorkbooks.ClearSelection();
+                }
+            }
+            catch
+            {
+                // ignore COM errors
+            }
+            finally
+            {
+                _gridWorkbooks.ResumeLayout();
+            }
+        }
+
+        public void RefreshWorksheets(Excel.Workbook activeWorkbook = null)
+        {
+            if (_app == null) return;
+
+            try
+            {
+                // Verify ActiveWorkbook is accessible
+                Excel.Workbook wb = activeWorkbook;
+                if (wb == null)
+                {
+                    try { wb = _app.ActiveWorkbook; } catch { return; }
+                }
+
+                _gridWorksheets.SuspendLayout();
+
+                if (wb == null)
+                {
+                    _gridWorksheets.Rows.Clear();
+                    UpdateCounts(0, 0, 0);
+                    return;
+                }
+
+                var filter = (_txtFilter.Text ?? string.Empty).Trim();
+                
+                string activeSheetName = null;
+                try 
+                { 
+                     var activeSheet = wb.ActiveSheet as Excel.Worksheet;
+                     activeSheetName = activeSheet?.Name;
+                } 
+                catch { }
+
+                // Calculate counts for all worksheets regardless of filter
+                int totalAll = 0, visibleAll = 0, hiddenAll = 0, veryHiddenAll = 0;
+                
+                // Use a safe list to avoid enumeration bugs if collection changes during iteration
+                var sheets = new List<Excel.Worksheet>();
+                foreach (Excel.Worksheet s in wb.Worksheets)
+                {
+                    sheets.Add(s);
+                }
+
+                foreach (Excel.Worksheet s in sheets)
+                {
+                    totalAll++;
+                    var v = GetSafe(() => s.Visible);
+                    if (v != null)
+                    {
+                        switch ((Excel.XlSheetVisibility)v)
+                        {
+                            case Excel.XlSheetVisibility.xlSheetVisible: visibleAll++; break;
+                            case Excel.XlSheetVisibility.xlSheetHidden: hiddenAll++; break;
+                            case Excel.XlSheetVisibility.xlSheetVeryHidden: veryHiddenAll++; break;
+                        }
+                    }
+                }
+
+                // preserve selection row index to avoid jumping
+                int selectedIndex = _gridWorksheets.CurrentCell != null ? _gridWorksheets.CurrentCell.RowIndex : -1;
+                string selectedName = selectedIndex >= 0 ? _gridWorksheets.Rows[selectedIndex].Cells["WsName"].Value as string : null;
+
+                _gridWorksheets.Rows.Clear();
+
+                // Fill grid for filtered items
+                int rowIndexToSelect = -1;
+                foreach (Excel.Worksheet sheet in sheets)
+                {
+                    string name = GetSafe(() => sheet.Name) ?? "";
+                    if (string.IsNullOrEmpty(name)) continue;
+
+                    if (!string.IsNullOrEmpty(filter) && name.IndexOf(filter, StringComparison.CurrentCultureIgnoreCase) < 0)
+                        continue;
+
+                    var vis = GetSafe(() => sheet.Visible); // Returns object (int)
+
+                    Image icon = _iconHidden;
+                    string stateText = "Hidden";
+
+                    if (vis != null)
+                    {
+                        switch ((Excel.XlSheetVisibility)vis)
+                        {
+                            case Excel.XlSheetVisibility.xlSheetVisible:
+                                icon = _iconVisible; stateText = "Visible"; break;
+                            case Excel.XlSheetVisibility.xlSheetHidden:
+                                icon = _iconHidden; stateText = "Hidden"; break;
+                            case Excel.XlSheetVisibility.xlSheetVeryHidden:
+                                icon = _iconVeryHidden; stateText = "VeryHidden"; break;
+                        }
+                    }
+
+                    int index = _gridWorksheets.Rows.Add(icon, name, stateText);
+                    var row = _gridWorksheets.Rows[index];
+
+                    // style by state
+                    if (stateText == "Visible")
+                    {
+                        row.DefaultCellStyle.BackColor = Color.Honeydew;
+                        row.DefaultCellStyle.ForeColor = Color.Black;
+                    }
+                    else if (stateText == "Hidden")
+                    {
+                        row.DefaultCellStyle.BackColor = Color.Gainsboro;
+                        row.DefaultCellStyle.ForeColor = Color.DimGray;
+                    }
+                    else // VeryHidden
+                    {
+                        row.DefaultCellStyle.BackColor = Color.DarkGray;
+                        row.DefaultCellStyle.ForeColor = Color.WhiteSmoke;
+                    }
+
+                    if (!string.IsNullOrEmpty(activeSheetName) && string.Equals(name, activeSheetName, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        row.DefaultCellStyle.Font = _boldFont;
+                        row.DefaultCellStyle.SelectionBackColor = Color.DarkSeaGreen;
+                        row.DefaultCellStyle.SelectionForeColor = Color.Black;
+                        
+                        // Always prioritize selecting the Active Worksheet during refresh
+                        // This ensures that if the user switches tabs in Excel, the grid updates to match.
+                        rowIndexToSelect = index;
+                    }
+                }
+
+                UpdateCounts(totalAll, visibleAll, hiddenAll + veryHiddenAll);
+
+                // restore selection
+                if (rowIndexToSelect >= 0 && rowIndexToSelect < _gridWorksheets.Rows.Count)
+                {
+                    _gridWorksheets.CurrentCell = _gridWorksheets.Rows[rowIndexToSelect].Cells["WsName"];
+                }
+                else 
+                {
+                    _gridWorksheets.ClearSelection();
+                }
+            }
+            catch (Exception ex)
+            {
+                // Log error if needed, but do not crash
+            }
+            finally
+            {
+                _gridWorksheets.ResumeLayout();
+            }
+        }
+
+        private void InitializeComponents()
+        {
+            this.Size = new Size(300, 600); // Set control size first
+            Dock = DockStyle.Fill;
+
+            _split = new SplitContainer
+            {
+                Dock = DockStyle.Fill,
+                Orientation = Orientation.Horizontal,
+                // Do NOT set SplitterDistance here to avoid ArgumentOutOfRangeException with default size
+            };
+            
+            // Explicitly set SplitContainer size before SplitterDistance to be safe
+            _split.Size = new Size(300, 600);
+            _split.SplitterDistance = 200; 
+
+            // Top: Workbooks
+            _wbToolStrip = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Dock = DockStyle.Top, RenderMode = ToolStripRenderMode.System };
+            _btnViewToggle = new ToolStripButton("View") { ToolTipText = "Toggle simple list / tree (reserved)" };
+            _btnSortAZ = new ToolStripButton("A→Z") { ToolTipText = "Sort ascending" };
+            _btnSortZA = new ToolStripButton("Z→A") { ToolTipText = "Sort descending" };
+            _btnRefresh = new ToolStripButton("Refresh") { ToolTipText = "Refresh" };
+            _btnHelp = new ToolStripButton("Help") { ToolTipText = "About" };
+            _wbToolStrip.Items.AddRange(new ToolStripItem[] { _btnViewToggle, new ToolStripSeparator(), _btnSortAZ, _btnSortZA, new ToolStripSeparator(), _btnRefresh, new ToolStripSeparator(), _btnHelp });
+
+            _gridWorkbooks = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                AllowUserToAddRows = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                AllowUserToOrderColumns = false,
+                ReadOnly = true,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect = false,
+                RowHeadersVisible = false,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                BackgroundColor = SystemColors.Window
+            };
+            var colWbName = new DataGridViewTextBoxColumn { Name = "WbName", HeaderText = "Workbook", FillWeight = 80, ReadOnly = true };
+            var colWbClose = new DataGridViewButtonColumn { Name = "WbClose", HeaderText = "", Text = "❌", UseColumnTextForButtonValue = true, FillWeight = 20 };
+            _gridWorkbooks.Columns.Add(colWbName);
+            _gridWorkbooks.Columns.Add(colWbClose);
+
+            _split.Panel1.Controls.Add(_gridWorkbooks);
+            _split.Panel1.Controls.Add(_wbToolStrip);
+
+            // Bottom: Worksheets
+            _wsTopPanel = new Panel { Dock = DockStyle.Top, Height = 32 };
+            _lblFilter = new Label { Text = "Filter:", AutoSize = true, Left = 6, Top = 8 };
+            _txtFilter = new TextBox { Left = 56, Top = 4, Width = 160, Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
+            _btnToggleHidden = new Button { Text = "显示隐藏切换", Left = 224, Top = 2, Width = 100, Height = 26, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            _lblCounts = new Label { Text = "", AutoSize = true, Anchor = AnchorStyles.Right | AnchorStyles.Top };
+            _lblCounts.Left = _wsTopPanel.Width - 120; _lblCounts.Top = 8;
+            _lblCounts.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+            _wsTopPanel.Controls.AddRange(new Control[] { _lblFilter, _txtFilter, _btnToggleHidden, _lblCounts });
+
+            _gridWorksheets = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                AllowUserToAddRows = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                ReadOnly = true,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect = false,
+                RowHeadersVisible = false,
+                AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
+                BackgroundColor = SystemColors.Window
+            };
+            var colWsIconState = new DataGridViewImageColumn { Name = "WsIconState", HeaderText = "State", FillWeight = 20 };
+            var colWsName = new DataGridViewTextBoxColumn { Name = "WsName", HeaderText = "Worksheet", FillWeight = 80, ReadOnly = true };
+            var colWsStateText = new DataGridViewTextBoxColumn { Name = "WsState", HeaderText = "", FillWeight = 1, Visible = false }; // FillWeight must be > 0
+            _gridWorksheets.Columns.Add(colWsIconState);
+            _gridWorksheets.Columns.Add(colWsName);
+            _gridWorksheets.Columns.Add(colWsStateText);
+
+            _split.Panel2.Controls.Add(_gridWorksheets);
+            _split.Panel2.Controls.Add(_wsTopPanel);
+
+            Controls.Add(_split);
+
+            // Events wiring
+            _btnSortAZ.Click += (s, e) => { _sortAsc = true; RefreshWorkbooks(); };
+            _btnSortZA.Click += (s, e) => { _sortAsc = false; RefreshWorkbooks(); };
+            _btnRefresh.Click += (s, e) => { RefreshAll(); };
+            _btnHelp.Click += (s, e) => { try { MessageBox.Show(this, "Excel Navigation Pane\nVersion 1.0", "About", MessageBoxButtons.OK, MessageBoxIcon.Information); } catch { } };
+
+            _txtFilter.TextChanged += (s, e) => { RefreshWorksheets(); };
+            _btnToggleHidden.Click += BtnToggleHidden_Click;
+
+            _gridWorkbooks.CellContentClick += GridWorkbooks_CellContentClick;
+            _gridWorkbooks.CellClick += GridWorkbooks_CellClick;
+            _gridWorkbooks.MouseDoubleClick += GridWorkbooks_MouseDoubleClick;
+
+            _gridWorksheets.CellClick += GridWorksheets_CellClick; // for toggling via icon or name
+        }
+
+        private void BtnToggleHidden_Click(object sender, EventArgs e)
+        {
+            if (_app == null) return;
+            try
+            {
+                var wb = _app.ActiveWorkbook;
+                if (wb == null) return;
+
+                if (_hiddenSnapshot.Count == 0 || !_hiddenApplied)
+                {
+                    // Take snapshot and hide all currently hidden sheets (state already hidden), next click will restore
+                    _hiddenSnapshot.Clear();
+                    foreach (Excel.Worksheet ws in wb.Worksheets)
+                    {
+                        if (ws.Visible == Excel.XlSheetVisibility.xlSheetHidden)
+                        {
+                            _hiddenSnapshot.Add(ws.Name);
+                        }
+                    }
+                    // Unhide all hidden sheets now
+                    foreach (Excel.Worksheet ws in wb.Worksheets)
+                    {
+                        if (ws.Visible == Excel.XlSheetVisibility.xlSheetHidden)
+                        {
+                            ws.Visible = Excel.XlSheetVisibility.xlSheetVisible;
+                        }
+                    }
+                    _hiddenApplied = true;
+                }
+                else
+                {
+                    // Restore hidden state according to snapshot
+                    foreach (Excel.Worksheet ws in wb.Worksheets)
+                    {
+                        bool shouldHide = _hiddenSnapshot.Contains(ws.Name);
+                        if (shouldHide && ws.Visible == Excel.XlSheetVisibility.xlSheetVisible)
+                        {
+                            ws.Visible = Excel.XlSheetVisibility.xlSheetHidden;
+                        }
+                    }
+                    _hiddenApplied = false;
+                }
+            }
+            catch { }
+            finally
+            {
+                RefreshWorksheets();
+            }
+        }
+
+        private void GridWorkbooks_CellClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            if (e.ColumnIndex != _gridWorkbooks.Columns["WbClose"].Index)
+            {
+                var name = _gridWorkbooks.Rows[e.RowIndex].Cells["WbName"].Value as string;
+                ActivateWorkbookByName(name);
+            }
+        }
+
+        private void GridWorkbooks_CellContentClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            if (e.ColumnIndex == _gridWorkbooks.Columns["WbClose"].Index)
+            {
+                var name = _gridWorkbooks.Rows[e.RowIndex].Cells["WbName"].Value as string;
+                CloseWorkbookByName(name);
+            }
+        }
+
+        private void GridWorkbooks_MouseDoubleClick(object sender, MouseEventArgs e)
+        {
+            var hit = _gridWorkbooks.HitTest(e.X, e.Y);
+            if (hit.Type == DataGridViewHitTestType.None || hit.RowIndex < 0)
+            {
+                try { _app?.Workbooks.Add(); } catch { }
+            }
+        }
+
+        private void GridWorksheets_CellClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            var name = _gridWorksheets.Rows[e.RowIndex].Cells["WsName"].Value as string;
+            if (e.ColumnIndex == _gridWorksheets.Columns["WsName"].Index)
+            {
+                ActivateWorksheetByName(name);
+                return;
+            }
+            if (e.ColumnIndex == _gridWorksheets.Columns["WsIconState"].Index)
+            {
+                var state = _gridWorksheets.Rows[e.RowIndex].Cells["WsState"].Value as string;
+                if (string.Equals(state, "VeryHidden", StringComparison.OrdinalIgnoreCase))
+                {
+                    return; // do not toggle VeryHidden
+                }
+                ToggleWorksheetVisibility(name);
+            }
+        }
+
+        private void ActivateWorkbookByName(string name)
+        {
+            if (_app == null || string.IsNullOrEmpty(name)) return;
+            try
+            {
+                foreach (Excel.Workbook wb in _app.Workbooks)
+                {
+                    if (string.Equals(wb.Name, name, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        wb.Activate();
+                        break;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void CloseWorkbookByName(string name)
+        {
+            if (_app == null || string.IsNullOrEmpty(name)) return;
+            try
+            {
+                foreach (Excel.Workbook wb in _app.Workbooks)
+                {
+                    if (string.Equals(wb.Name, name, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        wb.Close(false);
+                        break;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void ActivateWorksheetByName(string name)
+        {
+            if (_app == null || string.IsNullOrEmpty(name)) return;
+            try
+            {
+                var wb = _app.ActiveWorkbook;
+                if (wb == null) return;
+                foreach (Excel.Worksheet ws in wb.Worksheets)
+                {
+                    if (string.Equals(ws.Name, name, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        ws.Activate();
+                        // after activation, just refresh styles without changing selection
+                        RefreshWorksheets();
+                        break;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void ToggleWorksheetVisibility(string name)
+        {
+            if (_app == null || string.IsNullOrEmpty(name)) return;
+            try
+            {
+                var wb = _app.ActiveWorkbook;
+                if (wb == null) return;
+                foreach (Excel.Worksheet ws in wb.Worksheets)
+                {
+                    if (string.Equals(ws.Name, name, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        var vis = ws.Visible;
+                        if (vis == Excel.XlSheetVisibility.xlSheetVisible)
+                            ws.Visible = Excel.XlSheetVisibility.xlSheetHidden;
+                        else if (vis == Excel.XlSheetVisibility.xlSheetHidden)
+                            ws.Visible = Excel.XlSheetVisibility.xlSheetVisible;
+                        break;
+                    }
+                }
+            }
+            catch { }
+            finally
+            {
+                RefreshWorksheets();
+            }
+        }
+
+        private void UpdateCounts(int total, int visible, int hidden)
+        {
+            try
+            {
+                _lblCounts.Text = $"表: {total} | 可见: {visible} | 隐藏: {hidden}";
+            }
+            catch { }
+        }
+
+        private static T GetSafe<T>(Func<T> getter)
+        {
+            try { return getter(); } catch { return default(T); }
+        }
+
+        private static Image CreateCircleIcon(Color color)
+        {
+            var bmp = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                using (var brush = new SolidBrush(color))
+                {
+                    g.FillEllipse(brush, 2, 2, 12, 12);
+                }
+                g.DrawEllipse(Pens.DarkGray, 2, 2, 12, 12);
+            }
+            return bmp;
+        }
+
+        private static Image CreateLockIcon()
+        {
+            var bmp = new Bitmap(16, 16);
+            using (var g = Graphics.FromImage(bmp))
+            {
+                g.Clear(Color.Transparent);
+                using (var pen = new Pen(Color.DimGray, 2))
+                {
+                    // shackle
+                    g.DrawArc(pen, 4, 2, 8, 8, 200, 140);
+                    // body
+                    g.DrawRectangle(pen, 4, 7, 8, 7);
+                }
+            }
+            return bmp;
+        }
+    }
+}
