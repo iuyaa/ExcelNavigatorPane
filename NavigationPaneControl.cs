@@ -115,6 +115,15 @@ namespace ExcelNavigatorPane
                     _pendingWorkbookActivationAt = null;
                 }
 
+                if (!string.IsNullOrEmpty(_pendingWorkbookActivationName)
+                    && !string.IsNullOrEmpty(activeName)
+                    && !string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase)
+                    && !string.Equals(activeName, _lastActiveWorkbookName, StringComparison.CurrentCultureIgnoreCase))
+                {
+                    _pendingWorkbookActivationName = null;
+                    _pendingWorkbookActivationAt = null;
+                }
+
                 bool usePending = !string.IsNullOrEmpty(_pendingWorkbookActivationName)
                     && !string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase)
                     && string.Equals(activeName, _lastActiveWorkbookName, StringComparison.CurrentCultureIgnoreCase);
@@ -162,10 +171,13 @@ namespace ExcelNavigatorPane
                     _lastActiveWorkbookName = activeName;
                 }
 
-                if (!string.IsNullOrEmpty(_pendingWorkbookActivationName) && (!pendingFound || string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase)))
+                if (!string.IsNullOrEmpty(_pendingWorkbookActivationName))
                 {
-                    _pendingWorkbookActivationName = null;
-                    _pendingWorkbookActivationAt = null;
+                    if (!pendingFound || string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        _pendingWorkbookActivationName = null;
+                        _pendingWorkbookActivationAt = null;
+                    }
                 }
             }
             catch
@@ -416,6 +428,7 @@ namespace ExcelNavigatorPane
 
             _gridWorkbooks.CellContentClick += GridWorkbooks_CellContentClick;
             _gridWorkbooks.CellClick += GridWorkbooks_CellClick;
+            _gridWorkbooks.CellMouseDown += GridWorkbooks_CellMouseDown;
             _gridWorkbooks.MouseDoubleClick += GridWorkbooks_MouseDoubleClick;
 
             _gridWorksheets.CellClick += GridWorksheets_CellClick; // for toggling via icon or name
@@ -489,6 +502,19 @@ namespace ExcelNavigatorPane
                 var name = _gridWorkbooks.Rows[e.RowIndex].Cells["WbName"].Value as string;
                 CloseWorkbookByName(name);
             }
+        }
+
+        private void GridWorkbooks_CellMouseDown(object sender, DataGridViewCellMouseEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            if (e.Button != MouseButtons.Left) return;
+            if (e.ColumnIndex == _gridWorkbooks.Columns["WbClose"].Index) return;
+
+            var name = _gridWorkbooks.Rows[e.RowIndex].Cells["WbName"].Value as string;
+            if (string.IsNullOrEmpty(name)) return;
+
+            _pendingWorkbookActivationName = name;
+            _pendingWorkbookActivationAt = DateTime.UtcNow;
         }
 
         private void GridWorkbooks_MouseDoubleClick(object sender, MouseEventArgs e)
