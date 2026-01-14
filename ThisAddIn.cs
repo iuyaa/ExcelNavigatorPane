@@ -126,7 +126,7 @@ namespace ExcelNavigatorPane
                 control.Initialize(this.Application);
 
                 var pane = this.CustomTaskPanes.Add(control, "Navigation", win);
-                pane.DockPosition = Office.MsoCTPDockPosition.msoCTPDockPositionRight;
+                pane.DockPosition = Office.MsoCTPDockPosition.msoCTPDockPositionLeft;
                 pane.Width = 320;
                 pane.Visible = true;
 

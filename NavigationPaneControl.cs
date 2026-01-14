@@ -34,6 +34,9 @@ namespace ExcelNavigatorPane
         private Font _boldFont;
         private string _pendingWorkbookActivationName;
         private string _lastActiveWorkbookName;
+        private DateTime? _pendingWorkbookActivationAt;
+
+        private static readonly TimeSpan PendingWorkbookActivationTimeout = TimeSpan.FromMilliseconds(800);
 
         private HashSet<string> _hiddenSnapshot = new HashSet<string>(StringComparer.CurrentCultureIgnoreCase);
         private bool _hiddenApplied = true; // indicates current workbook sheets are in hidden state from snapshot
@@ -104,6 +107,14 @@ namespace ExcelNavigatorPane
                 catch { /* ignore */ }
 
                 string effectiveActiveName = activeName;
+                bool pendingExpired = _pendingWorkbookActivationAt.HasValue
+                    && DateTime.UtcNow - _pendingWorkbookActivationAt.Value > PendingWorkbookActivationTimeout;
+                if (pendingExpired)
+                {
+                    _pendingWorkbookActivationName = null;
+                    _pendingWorkbookActivationAt = null;
+                }
+
                 bool usePending = !string.IsNullOrEmpty(_pendingWorkbookActivationName)
                     && !string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase)
                     && string.Equals(activeName, _lastActiveWorkbookName, StringComparison.CurrentCultureIgnoreCase);
@@ -151,12 +162,10 @@ namespace ExcelNavigatorPane
                     _lastActiveWorkbookName = activeName;
                 }
 
-                if (!string.IsNullOrEmpty(_pendingWorkbookActivationName))
+                if (!string.IsNullOrEmpty(_pendingWorkbookActivationName) && (!pendingFound || string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase)))
                 {
-                    if (!pendingFound || string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase))
-                    {
-                        _pendingWorkbookActivationName = null;
-                    }
+                    _pendingWorkbookActivationName = null;
+                    _pendingWorkbookActivationAt = null;
                 }
             }
             catch
@@ -517,6 +526,7 @@ namespace ExcelNavigatorPane
             try
             {
                 _pendingWorkbookActivationName = name;
+                _pendingWorkbookActivationAt = DateTime.UtcNow;
                 foreach (Excel.Workbook wb in _app.Workbooks)
                 {
                     if (string.Equals(wb.Name, name, StringComparison.CurrentCultureIgnoreCase))
