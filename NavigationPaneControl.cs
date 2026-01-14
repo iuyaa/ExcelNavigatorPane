@@ -32,6 +32,8 @@ namespace ExcelNavigatorPane
 
         private bool _sortAsc = true;
         private Font _boldFont;
+        private string _pendingWorkbookActivationName;
+        private string _lastActiveWorkbookName;
 
         private HashSet<string> _hiddenSnapshot = new HashSet<string>(StringComparer.CurrentCultureIgnoreCase);
         private bool _hiddenApplied = true; // indicates current workbook sheets are in hidden state from snapshot
@@ -101,13 +103,27 @@ namespace ExcelNavigatorPane
                 } 
                 catch { /* ignore */ }
 
+                string effectiveActiveName = activeName;
+                bool usePending = !string.IsNullOrEmpty(_pendingWorkbookActivationName)
+                    && !string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase)
+                    && string.Equals(activeName, _lastActiveWorkbookName, StringComparison.CurrentCultureIgnoreCase);
+                if (usePending)
+                {
+                    effectiveActiveName = _pendingWorkbookActivationName;
+                }
+
                 int rowIndexToSelect = -1;
+                bool pendingFound = false;
 
                 foreach (var wb in books)
                 {
                     int rowIndex = _gridWorkbooks.Rows.Add(wb.Name, null);
                     var row = _gridWorkbooks.Rows[rowIndex];
-                    bool isActive = !string.IsNullOrEmpty(activeName) && string.Equals(wb.Name, activeName, StringComparison.CurrentCultureIgnoreCase);
+                    bool isActive = !string.IsNullOrEmpty(effectiveActiveName) && string.Equals(wb.Name, effectiveActiveName, StringComparison.CurrentCultureIgnoreCase);
+                    if (!string.IsNullOrEmpty(_pendingWorkbookActivationName) && string.Equals(wb.Name, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        pendingFound = true;
+                    }
                     
                     if (isActive)
                     {
@@ -128,6 +144,19 @@ namespace ExcelNavigatorPane
                 else
                 {
                     _gridWorkbooks.ClearSelection();
+                }
+
+                if (!string.IsNullOrEmpty(activeName))
+                {
+                    _lastActiveWorkbookName = activeName;
+                }
+
+                if (!string.IsNullOrEmpty(_pendingWorkbookActivationName))
+                {
+                    if (!pendingFound || string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        _pendingWorkbookActivationName = null;
+                    }
                 }
             }
             catch
@@ -487,6 +516,7 @@ namespace ExcelNavigatorPane
             if (_app == null || string.IsNullOrEmpty(name)) return;
             try
             {
+                _pendingWorkbookActivationName = name;
                 foreach (Excel.Workbook wb in _app.Workbooks)
                 {
                     if (string.Equals(wb.Name, name, StringComparison.CurrentCultureIgnoreCase))
