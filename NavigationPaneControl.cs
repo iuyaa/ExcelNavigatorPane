@@ -32,6 +32,13 @@ namespace ExcelNavigatorPane
 
         private bool _sortAsc = true;
         private Font _boldFont;
+        private string _pendingWorkbookActivationName;
+        private string _lastActiveWorkbookName;
+        private DateTime? _pendingWorkbookActivationAt;
+
+        private static readonly TimeSpan PendingWorkbookActivationTimeout = TimeSpan.FromMilliseconds(800);
+        private static readonly Color PaneHeaderBackColor = Color.FromArgb(236, 246, 238);
+        private static readonly Color PaneAccentColor = Color.FromArgb(22, 145, 67);
 
         private HashSet<string> _hiddenSnapshot = new HashSet<string>(StringComparer.CurrentCultureIgnoreCase);
         private bool _hiddenApplied = true; // indicates current workbook sheets are in hidden state from snapshot
@@ -101,13 +108,44 @@ namespace ExcelNavigatorPane
                 } 
                 catch { /* ignore */ }
 
+                string effectiveActiveName = activeName;
+                bool pendingExpired = _pendingWorkbookActivationAt.HasValue
+                    && DateTime.UtcNow - _pendingWorkbookActivationAt.Value > PendingWorkbookActivationTimeout;
+                if (pendingExpired)
+                {
+                    _pendingWorkbookActivationName = null;
+                    _pendingWorkbookActivationAt = null;
+                }
+
+                if (!string.IsNullOrEmpty(_pendingWorkbookActivationName)
+                    && !string.IsNullOrEmpty(activeName)
+                    && !string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase)
+                    && !string.Equals(activeName, _lastActiveWorkbookName, StringComparison.CurrentCultureIgnoreCase))
+                {
+                    _pendingWorkbookActivationName = null;
+                    _pendingWorkbookActivationAt = null;
+                }
+
+                bool usePending = !string.IsNullOrEmpty(_pendingWorkbookActivationName)
+                    && !string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase)
+                    && string.Equals(activeName, _lastActiveWorkbookName, StringComparison.CurrentCultureIgnoreCase);
+                if (usePending)
+                {
+                    effectiveActiveName = _pendingWorkbookActivationName;
+                }
+
                 int rowIndexToSelect = -1;
+                bool pendingFound = false;
 
                 foreach (var wb in books)
                 {
                     int rowIndex = _gridWorkbooks.Rows.Add(wb.Name, null);
                     var row = _gridWorkbooks.Rows[rowIndex];
-                    bool isActive = !string.IsNullOrEmpty(activeName) && string.Equals(wb.Name, activeName, StringComparison.CurrentCultureIgnoreCase);
+                    bool isActive = !string.IsNullOrEmpty(effectiveActiveName) && string.Equals(wb.Name, effectiveActiveName, StringComparison.CurrentCultureIgnoreCase);
+                    if (!string.IsNullOrEmpty(_pendingWorkbookActivationName) && string.Equals(wb.Name, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        pendingFound = true;
+                    }
                     
                     if (isActive)
                     {
@@ -128,6 +166,20 @@ namespace ExcelNavigatorPane
                 else
                 {
                     _gridWorkbooks.ClearSelection();
+                }
+
+                if (!string.IsNullOrEmpty(activeName))
+                {
+                    _lastActiveWorkbookName = activeName;
+                }
+
+                if (!string.IsNullOrEmpty(_pendingWorkbookActivationName))
+                {
+                    if (!pendingFound || string.Equals(activeName, _pendingWorkbookActivationName, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        _pendingWorkbookActivationName = null;
+                        _pendingWorkbookActivationAt = null;
+                    }
                 }
             }
             catch
@@ -289,6 +341,7 @@ namespace ExcelNavigatorPane
         {
             this.Size = new Size(300, 600); // Set control size first
             Dock = DockStyle.Fill;
+            BackColor = Color.White;
 
             _split = new SplitContainer
             {
@@ -302,7 +355,14 @@ namespace ExcelNavigatorPane
             _split.SplitterDistance = 200; 
 
             // Top: Workbooks
-            _wbToolStrip = new ToolStrip { GripStyle = ToolStripGripStyle.Hidden, Dock = DockStyle.Top, RenderMode = ToolStripRenderMode.System };
+            _wbToolStrip = new ToolStrip
+            {
+                GripStyle = ToolStripGripStyle.Hidden,
+                Dock = DockStyle.Top,
+                RenderMode = ToolStripRenderMode.System,
+                BackColor = PaneHeaderBackColor,
+                ForeColor = PaneAccentColor
+            };
             _btnViewToggle = new ToolStripButton("View") { ToolTipText = "Toggle simple list / tree (reserved)" };
             _btnSortAZ = new ToolStripButton("A→Z") { ToolTipText = "Sort ascending" };
             _btnSortZA = new ToolStripButton("Z→A") { ToolTipText = "Sort descending" };
@@ -322,8 +382,14 @@ namespace ExcelNavigatorPane
                 MultiSelect = false,
                 RowHeadersVisible = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                BackgroundColor = SystemColors.Window
+                BackgroundColor = SystemColors.Window,
+                EnableHeadersVisualStyles = false
             };
+            _gridWorkbooks.ColumnHeadersDefaultCellStyle.BackColor = PaneHeaderBackColor;
+            _gridWorkbooks.ColumnHeadersDefaultCellStyle.ForeColor = PaneAccentColor;
+            _gridWorkbooks.DefaultCellStyle.SelectionBackColor = Color.FromArgb(198, 234, 210);
+            _gridWorkbooks.DefaultCellStyle.SelectionForeColor = Color.Black;
+            _gridWorkbooks.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(247, 250, 248);
             var colWbName = new DataGridViewTextBoxColumn { Name = "WbName", HeaderText = "Workbook", FillWeight = 80, ReadOnly = true };
             var colWbClose = new DataGridViewButtonColumn { Name = "WbClose", HeaderText = "", Text = "❌", UseColumnTextForButtonValue = true, FillWeight = 20 };
             _gridWorkbooks.Columns.Add(colWbName);
@@ -333,10 +399,23 @@ namespace ExcelNavigatorPane
             _split.Panel1.Controls.Add(_wbToolStrip);
 
             // Bottom: Worksheets
-            _wsTopPanel = new Panel { Dock = DockStyle.Top, Height = 32 };
+            _wsTopPanel = new Panel { Dock = DockStyle.Top, Height = 32, BackColor = PaneHeaderBackColor };
             _lblFilter = new Label { Text = "Filter:", AutoSize = true, Left = 6, Top = 8 };
             _txtFilter = new TextBox { Left = 56, Top = 4, Width = 160, Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
-            _btnToggleHidden = new Button { Text = "显示隐藏切换", Left = 224, Top = 2, Width = 100, Height = 26, Anchor = AnchorStyles.Top | AnchorStyles.Right };
+            _btnToggleHidden = new Button
+            {
+                Text = "显示隐藏",
+                Left = 224,
+                Top = 2,
+                Width = 100,
+                Height = 26,
+                Anchor = AnchorStyles.Top | AnchorStyles.Right,
+                BackColor = Color.White,
+                ForeColor = PaneAccentColor,
+                FlatStyle = FlatStyle.Flat
+            };
+            _btnToggleHidden.FlatAppearance.BorderColor = PaneAccentColor;
+            _btnToggleHidden.FlatAppearance.BorderSize = 1;
             _lblCounts = new Label { Text = "", AutoSize = true, Anchor = AnchorStyles.Right | AnchorStyles.Top };
             _lblCounts.Left = _wsTopPanel.Width - 120; _lblCounts.Top = 8;
             _lblCounts.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -353,8 +432,14 @@ namespace ExcelNavigatorPane
                 MultiSelect = false,
                 RowHeadersVisible = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
-                BackgroundColor = SystemColors.Window
+                BackgroundColor = SystemColors.Window,
+                EnableHeadersVisualStyles = false
             };
+            _gridWorksheets.ColumnHeadersDefaultCellStyle.BackColor = PaneHeaderBackColor;
+            _gridWorksheets.ColumnHeadersDefaultCellStyle.ForeColor = PaneAccentColor;
+            _gridWorksheets.DefaultCellStyle.SelectionBackColor = Color.FromArgb(198, 234, 210);
+            _gridWorksheets.DefaultCellStyle.SelectionForeColor = Color.Black;
+            _gridWorksheets.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(247, 250, 248);
             var colWsIconState = new DataGridViewImageColumn { Name = "WsIconState", HeaderText = "State", FillWeight = 20 };
             var colWsName = new DataGridViewTextBoxColumn { Name = "WsName", HeaderText = "Worksheet", FillWeight = 80, ReadOnly = true };
             var colWsStateText = new DataGridViewTextBoxColumn { Name = "WsState", HeaderText = "", FillWeight = 1, Visible = false }; // FillWeight must be > 0
@@ -375,9 +460,11 @@ namespace ExcelNavigatorPane
 
             _txtFilter.TextChanged += (s, e) => { RefreshWorksheets(); };
             _btnToggleHidden.Click += BtnToggleHidden_Click;
+            UpdateToggleHiddenButton();
 
             _gridWorkbooks.CellContentClick += GridWorkbooks_CellContentClick;
             _gridWorkbooks.CellClick += GridWorkbooks_CellClick;
+            _gridWorkbooks.CellMouseDown += GridWorkbooks_CellMouseDown;
             _gridWorkbooks.MouseDoubleClick += GridWorkbooks_MouseDoubleClick;
 
             _gridWorksheets.CellClick += GridWorksheets_CellClick; // for toggling via icon or name
@@ -429,6 +516,7 @@ namespace ExcelNavigatorPane
             catch { }
             finally
             {
+                UpdateToggleHiddenButton();
                 RefreshWorksheets();
             }
         }
@@ -451,6 +539,19 @@ namespace ExcelNavigatorPane
                 var name = _gridWorkbooks.Rows[e.RowIndex].Cells["WbName"].Value as string;
                 CloseWorkbookByName(name);
             }
+        }
+
+        private void GridWorkbooks_CellMouseDown(object sender, DataGridViewCellMouseEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            if (e.Button != MouseButtons.Left) return;
+            if (e.ColumnIndex == _gridWorkbooks.Columns["WbClose"].Index) return;
+
+            var name = _gridWorkbooks.Rows[e.RowIndex].Cells["WbName"].Value as string;
+            if (string.IsNullOrEmpty(name)) return;
+
+            _pendingWorkbookActivationName = name;
+            _pendingWorkbookActivationAt = DateTime.UtcNow;
         }
 
         private void GridWorkbooks_MouseDoubleClick(object sender, MouseEventArgs e)
@@ -487,6 +588,8 @@ namespace ExcelNavigatorPane
             if (_app == null || string.IsNullOrEmpty(name)) return;
             try
             {
+                _pendingWorkbookActivationName = name;
+                _pendingWorkbookActivationAt = DateTime.UtcNow;
                 foreach (Excel.Workbook wb in _app.Workbooks)
                 {
                     if (string.Equals(wb.Name, name, StringComparison.CurrentCultureIgnoreCase))
@@ -571,6 +674,19 @@ namespace ExcelNavigatorPane
                 _lblCounts.Text = $"表: {total} | 可见: {visible} | 隐藏: {hidden}";
             }
             catch { }
+        }
+
+        private void UpdateToggleHiddenButton()
+        {
+            if (_btnToggleHidden == null) return;
+            if (_hiddenApplied)
+            {
+                _btnToggleHidden.Text = "恢复隐藏";
+            }
+            else
+            {
+                _btnToggleHidden.Text = "显示隐藏";
+            }
         }
 
         private static T GetSafe<T>(Func<T> getter)
