@@ -23,11 +23,11 @@ namespace ExcelNavigatorPane
 
         private DataGridView _gridWorkbooks;
 
-        private Panel _wsTopPanel;
-        private TextBox _txtFilter;
-        private Label _lblFilter;
-        private Label _lblCounts;
-        private Button _btnToggleHidden; // new button
+        private ToolStrip _wsToolStrip;
+        private ToolStripLabel _lblFilter;
+        private ToolStripTextBox _txtFilter;
+        private ToolStripLabel _lblCounts;
+        private ToolStripButton _btnToggleHidden;
         private DataGridView _gridWorksheets;
 
         private bool _sortAsc = true;
@@ -151,10 +151,6 @@ namespace ExcelNavigatorPane
                     {
                         row.DefaultCellStyle.BackColor = Color.Honeydew; // light green
                         rowIndexToSelect = rowIndex;
-                    }
-                    else
-                    {
-                        row.DefaultCellStyle.BackColor = Color.White;
                     }
                 }
 
@@ -286,23 +282,6 @@ namespace ExcelNavigatorPane
                     int index = _gridWorksheets.Rows.Add(icon, name, stateText);
                     var row = _gridWorksheets.Rows[index];
 
-                    // style by state
-                    if (stateText == "Visible")
-                    {
-                        row.DefaultCellStyle.BackColor = Color.Honeydew;
-                        row.DefaultCellStyle.ForeColor = Color.Black;
-                    }
-                    else if (stateText == "Hidden")
-                    {
-                        row.DefaultCellStyle.BackColor = Color.Gainsboro;
-                        row.DefaultCellStyle.ForeColor = Color.DimGray;
-                    }
-                    else // VeryHidden
-                    {
-                        row.DefaultCellStyle.BackColor = Color.DarkGray;
-                        row.DefaultCellStyle.ForeColor = Color.WhiteSmoke;
-                    }
-
                     if (!string.IsNullOrEmpty(activeSheetName) && string.Equals(name, activeSheetName, StringComparison.CurrentCultureIgnoreCase))
                     {
                         row.DefaultCellStyle.Font = _boldFont;
@@ -389,7 +368,6 @@ namespace ExcelNavigatorPane
             _gridWorkbooks.ColumnHeadersDefaultCellStyle.ForeColor = PaneAccentColor;
             _gridWorkbooks.DefaultCellStyle.SelectionBackColor = Color.FromArgb(198, 234, 210);
             _gridWorkbooks.DefaultCellStyle.SelectionForeColor = Color.Black;
-            _gridWorkbooks.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(247, 250, 248);
             var colWbName = new DataGridViewTextBoxColumn { Name = "WbName", HeaderText = "Workbook", FillWeight = 80, ReadOnly = true };
             var colWbClose = new DataGridViewButtonColumn { Name = "WbClose", HeaderText = "", Text = "❌", UseColumnTextForButtonValue = true, FillWeight = 20 };
             _gridWorkbooks.Columns.Add(colWbName);
@@ -399,27 +377,27 @@ namespace ExcelNavigatorPane
             _split.Panel1.Controls.Add(_wbToolStrip);
 
             // Bottom: Worksheets
-            _wsTopPanel = new Panel { Dock = DockStyle.Top, Height = 32, BackColor = PaneHeaderBackColor };
-            _lblFilter = new Label { Text = "Filter:", AutoSize = true, Left = 6, Top = 8 };
-            _txtFilter = new TextBox { Left = 56, Top = 4, Width = 160, Anchor = AnchorStyles.Left | AnchorStyles.Top | AnchorStyles.Right };
-            _btnToggleHidden = new Button
+            _wsToolStrip = new ToolStrip
             {
-                Text = "显示隐藏",
-                Left = 224,
-                Top = 2,
-                Width = 100,
-                Height = 26,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                BackColor = Color.White,
-                ForeColor = PaneAccentColor,
-                FlatStyle = FlatStyle.Flat
+                GripStyle = ToolStripGripStyle.Hidden,
+                Dock = DockStyle.Top,
+                RenderMode = ToolStripRenderMode.System,
+                BackColor = PaneHeaderBackColor,
+                ForeColor = PaneAccentColor
             };
-            _btnToggleHidden.FlatAppearance.BorderColor = PaneAccentColor;
-            _btnToggleHidden.FlatAppearance.BorderSize = 1;
-            _lblCounts = new Label { Text = "", AutoSize = true, Anchor = AnchorStyles.Right | AnchorStyles.Top };
-            _lblCounts.Left = _wsTopPanel.Width - 120; _lblCounts.Top = 8;
-            _lblCounts.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-            _wsTopPanel.Controls.AddRange(new Control[] { _lblFilter, _txtFilter, _btnToggleHidden, _lblCounts });
+            _lblFilter = new ToolStripLabel("筛选:");
+            _txtFilter = new ToolStripTextBox { AutoSize = false, Width = 160 };
+            _btnToggleHidden = new ToolStripButton("显示隐藏");
+            _lblCounts = new ToolStripLabel();
+            _wsToolStrip.Items.AddRange(new ToolStripItem[]
+            {
+                _lblFilter,
+                _txtFilter,
+                new ToolStripSeparator(),
+                _btnToggleHidden,
+                new ToolStripSeparator(),
+                _lblCounts
+            });
 
             _gridWorksheets = new DataGridView
             {
@@ -439,16 +417,15 @@ namespace ExcelNavigatorPane
             _gridWorksheets.ColumnHeadersDefaultCellStyle.ForeColor = PaneAccentColor;
             _gridWorksheets.DefaultCellStyle.SelectionBackColor = Color.FromArgb(198, 234, 210);
             _gridWorksheets.DefaultCellStyle.SelectionForeColor = Color.Black;
-            _gridWorksheets.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(247, 250, 248);
-            var colWsIconState = new DataGridViewImageColumn { Name = "WsIconState", HeaderText = "State", FillWeight = 20 };
-            var colWsName = new DataGridViewTextBoxColumn { Name = "WsName", HeaderText = "Worksheet", FillWeight = 80, ReadOnly = true };
-            var colWsStateText = new DataGridViewTextBoxColumn { Name = "WsState", HeaderText = "", FillWeight = 1, Visible = false }; // FillWeight must be > 0
+            var colWsIconState = new DataGridViewImageColumn { Name = "WsIconState", HeaderText = "", FillWeight = 12 };
+            var colWsName = new DataGridViewTextBoxColumn { Name = "WsName", HeaderText = "Worksheet", FillWeight = 68, ReadOnly = true };
+            var colWsStateText = new DataGridViewTextBoxColumn { Name = "WsState", HeaderText = "State", FillWeight = 20 };
             _gridWorksheets.Columns.Add(colWsIconState);
             _gridWorksheets.Columns.Add(colWsName);
             _gridWorksheets.Columns.Add(colWsStateText);
 
             _split.Panel2.Controls.Add(_gridWorksheets);
-            _split.Panel2.Controls.Add(_wsTopPanel);
+            _split.Panel2.Controls.Add(_wsToolStrip);
 
             Controls.Add(_split);
 
