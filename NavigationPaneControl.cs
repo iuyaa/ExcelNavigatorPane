@@ -366,14 +366,25 @@ namespace ExcelNavigatorPane
                 RowHeadersVisible = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
                 BackgroundColor = SystemColors.Window,
-                EnableHeadersVisualStyles = false
+                EnableHeadersVisualStyles = false,
+                HideSelection = false,
+                CellBorderStyle = DataGridViewCellBorderStyle.None,
+                BorderStyle = BorderStyle.FixedSingle
             };
             _gridWorkbooks.ColumnHeadersDefaultCellStyle.BackColor = PaneHeaderBackColor;
             _gridWorkbooks.ColumnHeadersDefaultCellStyle.ForeColor = PaneAccentColor;
             _gridWorkbooks.DefaultCellStyle.SelectionBackColor = Color.FromArgb(198, 234, 210);
             _gridWorkbooks.DefaultCellStyle.SelectionForeColor = Color.Black;
             var colWbName = new DataGridViewTextBoxColumn { Name = "WbName", HeaderText = "Workbook", FillWeight = 80, ReadOnly = true };
-            var colWbClose = new DataGridViewButtonColumn { Name = "WbClose", HeaderText = "", Text = "❌", UseColumnTextForButtonValue = true, FillWeight = 20 };
+            var colWbClose = new DataGridViewButtonColumn
+            {
+                Name = "WbClose",
+                HeaderText = "",
+                Text = "❌",
+                UseColumnTextForButtonValue = true,
+                FillWeight = 20,
+                FlatStyle = FlatStyle.Flat
+            };
             _gridWorkbooks.Columns.Add(colWbName);
             _gridWorkbooks.Columns.Add(colWbClose);
 
@@ -412,7 +423,10 @@ namespace ExcelNavigatorPane
                 RowHeadersVisible = false,
                 AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill,
                 BackgroundColor = SystemColors.Window,
-                EnableHeadersVisualStyles = false
+                EnableHeadersVisualStyles = false,
+                HideSelection = false,
+                CellBorderStyle = DataGridViewCellBorderStyle.None,
+                BorderStyle = BorderStyle.FixedSingle
             };
             _gridWorksheets.ColumnHeadersDefaultCellStyle.BackColor = PaneHeaderBackColor;
             _gridWorksheets.ColumnHeadersDefaultCellStyle.ForeColor = PaneAccentColor;
