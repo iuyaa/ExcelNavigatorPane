@@ -126,7 +126,7 @@ namespace ExcelNavigatorPane
                 control.Initialize(this.Application);
 
                 var pane = this.CustomTaskPanes.Add(control, "Navigation", win);
-                pane.DockPosition = Office.MsoCTPDockPosition.msoCTPDockPositionRight;
+                pane.DockPosition = Office.MsoCTPDockPosition.msoCTPDockPositionLeft;
                 pane.Width = 320;
                 pane.Visible = true;
 
@@ -144,33 +144,28 @@ namespace ExcelNavigatorPane
                 int hwnd = 0;
                 try { hwnd = win.Hwnd; } catch { return; }
 
-                if (_windowPanes.TryGetValue(hwnd, out var tuple))
+                if (!_windowPanes.ContainsKey(hwnd))
                 {
-                    var control = tuple.Control;
-                    if (control != null)
-                    {
-                        if (all) control.RefreshAll(activeWorkbook: activeWb);
-                        else control.RefreshWorksheets(activeWorkbook: activeWb);
-                    }
-                }
-                else
-                {
-                    // If pane not created yet for this window, create and refresh
                     EnsurePaneForActiveWindow();
-                    if (_windowPanes.TryGetValue(hwnd, out var tuple2))
-                    {
-                        var control = tuple2.Control;
-                        if (control != null)
-                        {
-                            if (all) control.RefreshAll(activeWorkbook: activeWb);
-                            else control.RefreshWorksheets(activeWorkbook: activeWb);
-                        }
-                    }
                 }
+
+                RefreshAllPanes(all, activeWb);
             }
-            catch 
+            catch
             {
                 // 刷新过程中的错误静默处理
+            }
+        }
+
+        private void RefreshAllPanes(bool all, Excel.Workbook activeWb)
+        {
+            foreach (var pane in _windowPanes.Values)
+            {
+                var control = pane.Control;
+                if (control == null) continue;
+
+                if (all) control.RefreshAll(activeWorkbook: activeWb);
+                else control.RefreshWorksheets(activeWorkbook: activeWb);
             }
         }
 
