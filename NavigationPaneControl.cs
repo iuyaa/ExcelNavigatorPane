@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
+using Microsoft.VisualBasic;
 using Excel = Microsoft.Office.Interop.Excel;
 
 namespace ExcelNavigatorPane
@@ -26,9 +27,12 @@ namespace ExcelNavigatorPane
         private ToolStrip _wsToolStrip;
         private ToolStripLabel _lblFilter;
         private ToolStripTextBox _txtFilter;
-        private ToolStripLabel _lblCounts;
         private ToolStripButton _btnToggleHidden;
         private DataGridView _gridWorksheets;
+        private Panel _wsBottomPanel;
+        private Label _lblCounts;
+
+        private ContextMenuStrip _workbookContextMenu;
 
         private bool _sortAsc = true;
         private Font _boldFont;
@@ -339,8 +343,8 @@ namespace ExcelNavigatorPane
                 GripStyle = ToolStripGripStyle.Hidden,
                 Dock = DockStyle.Top,
                 RenderMode = ToolStripRenderMode.System,
-                BackColor = PaneHeaderBackColor,
-                ForeColor = PaneAccentColor
+                BackColor = SystemColors.Control,
+                ForeColor = SystemColors.ControlText
             };
             _btnViewToggle = new ToolStripButton("View") { ToolTipText = "Toggle simple list / tree (reserved)" };
             _btnSortAZ = new ToolStripButton("A→Z") { ToolTipText = "Sort ascending" };
@@ -382,21 +386,18 @@ namespace ExcelNavigatorPane
                 GripStyle = ToolStripGripStyle.Hidden,
                 Dock = DockStyle.Top,
                 RenderMode = ToolStripRenderMode.System,
-                BackColor = PaneHeaderBackColor,
-                ForeColor = PaneAccentColor
+                BackColor = SystemColors.Control,
+                ForeColor = SystemColors.ControlText
             };
             _lblFilter = new ToolStripLabel("筛选:");
             _txtFilter = new ToolStripTextBox { AutoSize = false, Width = 160 };
             _btnToggleHidden = new ToolStripButton("显示隐藏");
-            _lblCounts = new ToolStripLabel();
             _wsToolStrip.Items.AddRange(new ToolStripItem[]
             {
                 _lblFilter,
                 _txtFilter,
                 new ToolStripSeparator(),
-                _btnToggleHidden,
-                new ToolStripSeparator(),
-                _lblCounts
+                _btnToggleHidden
             });
 
             _gridWorksheets = new DataGridView
@@ -424,7 +425,12 @@ namespace ExcelNavigatorPane
             _gridWorksheets.Columns.Add(colWsName);
             _gridWorksheets.Columns.Add(colWsStateText);
 
+            _wsBottomPanel = new Panel { Dock = DockStyle.Bottom, Height = 22, BackColor = SystemColors.Control };
+            _lblCounts = new Label { AutoSize = true, Left = 6, Top = 4 };
+            _wsBottomPanel.Controls.Add(_lblCounts);
+
             _split.Panel2.Controls.Add(_gridWorksheets);
+            _split.Panel2.Controls.Add(_wsBottomPanel);
             _split.Panel2.Controls.Add(_wsToolStrip);
 
             Controls.Add(_split);
@@ -443,8 +449,13 @@ namespace ExcelNavigatorPane
             _gridWorkbooks.CellClick += GridWorkbooks_CellClick;
             _gridWorkbooks.CellMouseDown += GridWorkbooks_CellMouseDown;
             _gridWorkbooks.MouseDoubleClick += GridWorkbooks_MouseDoubleClick;
+            _gridWorkbooks.CellDoubleClick += GridWorkbooks_CellDoubleClick;
+            _gridWorkbooks.MouseDown += GridWorkbooks_MouseDown;
 
             _gridWorksheets.CellClick += GridWorksheets_CellClick; // for toggling via icon or name
+            _gridWorksheets.MouseDown += GridWorksheets_MouseDown;
+
+            InitializeWorkbookContextMenu();
         }
 
         private void BtnToggleHidden_Click(object sender, EventArgs e)
@@ -540,6 +551,49 @@ namespace ExcelNavigatorPane
             }
         }
 
+        private void GridWorkbooks_CellDoubleClick(object sender, DataGridViewCellEventArgs e)
+        {
+            if (e.RowIndex < 0) return;
+            if (e.ColumnIndex == _gridWorkbooks.Columns["WbClose"].Index) return;
+
+            var name = _gridWorkbooks.Rows[e.RowIndex].Cells["WbName"].Value as string;
+            if (string.IsNullOrEmpty(name)) return;
+
+            RenameWorkbookByName(name);
+        }
+
+        private void GridWorkbooks_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Right) return;
+            _gridWorkbooks.ClearSelection();
+            var hit = _gridWorkbooks.HitTest(e.X, e.Y);
+            if (hit.RowIndex >= 0)
+            {
+                _gridWorkbooks.Rows[hit.RowIndex].Selected = true;
+            }
+            _workbookContextMenu?.Show(_gridWorkbooks, new Point(e.X, e.Y));
+        }
+
+        private void GridWorksheets_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Right) return;
+            var hit = _gridWorksheets.HitTest(e.X, e.Y);
+            if (hit.RowIndex < 0) return;
+
+            var state = _gridWorksheets.Rows[hit.RowIndex].Cells["WsState"].Value as string;
+            if (string.Equals(state, "Hidden", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(state, "VeryHidden", StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            var name = _gridWorksheets.Rows[hit.RowIndex].Cells["WsName"].Value as string;
+            if (string.IsNullOrEmpty(name)) return;
+
+            ActivateWorksheetByName(name);
+            ShowWorksheetTabContextMenu();
+        }
+
         private void GridWorksheets_CellClick(object sender, DataGridViewCellEventArgs e)
         {
             if (e.RowIndex < 0) return;
@@ -575,6 +629,143 @@ namespace ExcelNavigatorPane
                         break;
                     }
                 }
+            }
+            catch { }
+        }
+
+        private void InitializeWorkbookContextMenu()
+        {
+            _workbookContextMenu = new ContextMenuStrip();
+            _workbookContextMenu.Items.Add("新建", null, (s, e) => CreateNewWorkbook());
+            _workbookContextMenu.Items.Add("打开", null, (s, e) => OpenWorkbook());
+            _workbookContextMenu.Items.Add(new ToolStripSeparator());
+            _workbookContextMenu.Items.Add("保存", null, (s, e) => SaveActiveWorkbook());
+            _workbookContextMenu.Items.Add("重命名", null, (s, e) => RenameActiveWorkbook());
+            _workbookContextMenu.Items.Add("关闭", null, (s, e) => CloseActiveWorkbook());
+        }
+
+        private void CreateNewWorkbook()
+        {
+            try { _app?.Workbooks.Add(); } catch { }
+        }
+
+        private void OpenWorkbook()
+        {
+            if (_app == null) return;
+            try
+            {
+                using (var dialog = new OpenFileDialog())
+                {
+                    dialog.Filter = "Excel Files (*.xlsx;*.xls;*.xlsm;*.xlsb)|*.xlsx;*.xls;*.xlsm;*.xlsb|All Files (*.*)|*.*";
+                    if (dialog.ShowDialog() == DialogResult.OK)
+                    {
+                        _app.Workbooks.Open(dialog.FileName);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void SaveActiveWorkbook()
+        {
+            if (_app == null) return;
+            try
+            {
+                var wb = _app.ActiveWorkbook;
+                wb?.Save();
+            }
+            catch { }
+        }
+
+        private void RenameActiveWorkbook()
+        {
+            if (_app == null) return;
+            try
+            {
+                var wb = _app.ActiveWorkbook;
+                if (wb == null) return;
+                RenameWorkbook(wb);
+            }
+            catch { }
+        }
+
+        private void CloseActiveWorkbook()
+        {
+            if (_app == null) return;
+            try
+            {
+                var wb = _app.ActiveWorkbook;
+                wb?.Close(false);
+            }
+            catch { }
+        }
+
+        private void RenameWorkbookByName(string name)
+        {
+            if (_app == null || string.IsNullOrEmpty(name)) return;
+            try
+            {
+                foreach (Excel.Workbook wb in _app.Workbooks)
+                {
+                    if (string.Equals(wb.Name, name, StringComparison.CurrentCultureIgnoreCase))
+                    {
+                        RenameWorkbook(wb);
+                        break;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void RenameWorkbook(Excel.Workbook wb)
+        {
+            if (wb == null) return;
+            try
+            {
+                string currentName = wb.Name;
+                string input = Interaction.InputBox("输入新的工作簿名:", "重命名工作簿", currentName);
+                if (string.IsNullOrWhiteSpace(input)) return;
+
+                string extension = System.IO.Path.GetExtension(currentName);
+                if (string.IsNullOrEmpty(extension))
+                {
+                    extension = ".xlsx";
+                }
+
+                string newName = input.Trim();
+                if (System.IO.Path.GetExtension(newName) == string.Empty)
+                {
+                    newName += extension;
+                }
+
+                if (!string.IsNullOrEmpty(wb.Path))
+                {
+                    string newPath = System.IO.Path.Combine(wb.Path, newName);
+                    wb.SaveAs(newPath);
+                }
+                else
+                {
+                    using (var dialog = new SaveFileDialog())
+                    {
+                        dialog.FileName = newName;
+                        dialog.Filter = "Excel Files (*.xlsx)|*.xlsx|Excel Macro-Enabled Workbook (*.xlsm)|*.xlsm|Excel Binary Workbook (*.xlsb)|*.xlsb|Excel 97-2003 Workbook (*.xls)|*.xls";
+                        if (dialog.ShowDialog() == DialogResult.OK)
+                        {
+                            wb.SaveAs(dialog.FileName);
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void ShowWorksheetTabContextMenu()
+        {
+            if (_app == null) return;
+            try
+            {
+                var commandBar = _app.CommandBars["Worksheet Tab"];
+                commandBar?.ShowPopup();
             }
             catch { }
         }
