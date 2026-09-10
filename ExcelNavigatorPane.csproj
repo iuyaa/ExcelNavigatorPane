@@ -28,12 +28,18 @@
     <AssemblyName>ExcelNavigatorPane</AssemblyName>
     <LoadBehavior>3</LoadBehavior>
     <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <UpdateEnabled Condition="'$(UpdateEnabled)' == ''">false</UpdateEnabled>
     <DefineConstants>VSTO40</DefineConstants>
     <BootstrapperEnabled>true</BootstrapperEnabled>
     <BootstrapperComponentsLocation>HomeSite</BootstrapperComponentsLocation>
     <ResolveComReferenceSilent>true</ResolveComReferenceSilent>
   </PropertyGroup>
   <ItemGroup>
+    <BootstrapperPackage Include=".NETFramework,Version=v4.8">
+      <Visible>False</Visible>
+      <ProductName>Microsoft .NET Framework 4.8</ProductName>
+      <Install>true</Install>
+    </BootstrapperPackage>
     <BootstrapperPackage Include="Microsoft.VSTORuntime.4.0">
       <Visible>False</Visible>
       <ProductName>Microsoft Visual Studio 2010 Tools for Office Runtime %28x86 and x64%29</ProductName>
@@ -106,6 +112,7 @@
     <Reference Include="System" />
     <Reference Include="System.Data" />
     <Reference Include="System.Drawing" />
+    <Reference Include="System.Net.Http" />
     <Reference Include="System.Windows.Forms" />
     <Reference Include="System.Xml" />
     <Reference Include="System.Core" />
@@ -186,7 +193,14 @@
     The "AppDesigner" element specifies the directory where the application properties files
     can be found.
   -->
+  <PropertyGroup>
+    <UpdateSettingsFile Condition="'$(UpdateSettingsFile)' == ''">Properties\UpdateSettings.xml</UpdateSettingsFile>
+  </PropertyGroup>
   <ItemGroup>
+    <Compile Include="UpdateChecker.cs" />
+    <EmbeddedResource Include="$(UpdateSettingsFile)">
+      <LogicalName>ExcelNavigatorPane.UpdateSettings.xml</LogicalName>
+    </EmbeddedResource>
     <Compile Include="NavigationPaneControl.cs">
       <SubType>UserControl</SubType>
     </Compile>

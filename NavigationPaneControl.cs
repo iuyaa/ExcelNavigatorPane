@@ -98,6 +98,9 @@ namespace ExcelNavigatorPane
             }
         }
         private Panel _workbookPanel;
+        private Splitter _workbookSplitter;
+        private int? _manualWorkbookHeight;
+        private bool _updatingWorkbookLayout;
         private ToolStripLabel _workbookHeading;
         private ToolStripLabel _worksheetHeading;
         private readonly List<Image> _toolbarImages = new List<Image>();
@@ -109,6 +112,7 @@ namespace ExcelNavigatorPane
         private ToolStrip _wsToolStrip;
         private ToolStripTextBox _txtFilter;
         private ToolStripButton _btnToggleHidden;
+        private ToolStripButton _btnListHiddenSheets;
         private ToolStripButton _btnRecentSheets;
         private NavigationListBox _lbWorksheets;
         private Label _lblCounts;
@@ -161,7 +165,7 @@ namespace ExcelNavigatorPane
 
             protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
             {
-                e.TextColor = ColorTextMain;
+                e.TextColor = e.Item.Enabled ? ColorTextMain : SystemColors.GrayText;
                 base.OnRenderItemText(e);
             }
         }
@@ -179,6 +183,10 @@ namespace ExcelNavigatorPane
             public override Color ButtonSelectedGradientMiddle => ColorHover;
             public override Color ButtonSelectedGradientEnd => ColorHover;
             public override Color ButtonSelectedBorder => Color.Transparent;
+            public override Color ButtonCheckedGradientBegin => ColorKutoolsActive;
+            public override Color ButtonCheckedGradientMiddle => ColorKutoolsActive;
+            public override Color ButtonCheckedGradientEnd => ColorKutoolsActive;
+            public override Color ButtonCheckedHighlight => ColorKutoolsActive;
             public override Color ButtonPressedHighlight => ColorBorderDark;
             public override Color ButtonPressedGradientBegin => ColorBorderDark;
             public override Color ButtonPressedGradientMiddle => ColorBorderDark;
@@ -379,9 +387,7 @@ namespace ExcelNavigatorPane
                     else hidden++;
 
                     string name = GetValue(() => worksheet.Name, reportErrors) ?? string.Empty;
-                    if (name.Length == 0 ||
-                        (filter.Length > 0 &&
-                         name.IndexOf(filter, StringComparison.CurrentCultureIgnoreCase) < 0))
+                    if (!ShouldListWorksheet(name, visibility, filter))
                     {
                         continue;
                     }
@@ -462,7 +468,33 @@ namespace ExcelNavigatorPane
             var sortMenu = new ToolStripMenuItem("排序");
             sortMenu.DropDownItems.AddRange(new ToolStripItem[] { _btnWbSortAZ, _btnWbSortZA });
             var help = new ToolStripMenuItem("关于导航栏");
-            workbookActions.DropDownItems.AddRange(new ToolStripItem[] { new ToolStripSeparator(), sortMenu, help });
+            var checkUpdates = new ToolStripMenuItem("检查更新") { ToolTipText = "检查新版本；不会关闭 Excel 或中断当前工作" };
+            checkUpdates.Click += async (sender, args) =>
+            {
+                if (!IsReadyForCommands()) return;
+                checkUpdates.Enabled = false;
+                checkUpdates.Text = "正在检查更新…";
+                string result;
+                try
+                {
+                    result = await UpdateChecker.CheckAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    LogDebug("检查更新失败。", ex);
+                    result = "无法检查更新，请稍后重试。";
+                }
+                if (IsDisposed) return;
+                _uiContext.Post(_ =>
+                {
+                    checkUpdates.ToolTipText = result;
+                    checkUpdates.Enabled = true;
+                    checkUpdates.Text = "检查更新";
+                    if (IsReadyForCommands()) ShowInformation(result);
+                    else checkUpdates.Text = "更新检查完成（悬停查看）";
+                }, null);
+            };
+            workbookActions.DropDownItems.AddRange(new ToolStripItem[] { new ToolStripSeparator(), sortMenu, checkUpdates, help });
             var newWorkbook = new ToolStripButton { Image = CreateToolbarIcon("add"), DisplayStyle = ToolStripItemDisplayStyle.Image,
                 ToolTipText = "新建工作簿", AccessibleName = "新建工作簿", Alignment = ToolStripItemAlignment.Right };
             newWorkbook.Click += (sender, args) => NewWorkbook();
@@ -505,9 +537,13 @@ namespace ExcelNavigatorPane
                 AutoSize = true
             };
             _worksheetHeading = new ToolStripLabel("工作表") { Font = _titleFont };
+            _btnListHiddenSheets = new ToolStripButton { Checked = true,
+                DisplayStyle = ToolStripItemDisplayStyle.Text, Alignment = ToolStripItemAlignment.Right };
+            _btnListHiddenSheets.CheckedChanged += (sender, args) => UpdateListedHiddenSheetsButton();
+            UpdateListedHiddenSheetsButton();
             var refreshWorksheets = new ToolStripButton { Image = CreateToolbarIcon("refresh"), DisplayStyle = ToolStripItemDisplayStyle.Image,
                 ToolTipText = "刷新工作表", AccessibleName = "刷新工作表", Alignment = ToolStripItemAlignment.Right };
-            _wsToolStrip.Items.AddRange(new ToolStripItem[] { _worksheetHeading, refreshWorksheets });
+            _wsToolStrip.Items.AddRange(new ToolStripItem[] { _worksheetHeading, refreshWorksheets, _btnListHiddenSheets });
 
             var searchStrip = new ToolStrip { Dock = DockStyle.Top, GripStyle = ToolStripGripStyle.Hidden,
                 Renderer = flatRenderer, BackColor = ColorSidebar, Padding = new Padding(6, 5, 6, 5) };
@@ -522,8 +558,8 @@ namespace ExcelNavigatorPane
 
             var sheetActions = new ToolStrip { Dock = DockStyle.Top, GripStyle = ToolStripGripStyle.Hidden,
                 Renderer = flatRenderer, BackColor = ColorBg, Padding = new Padding(0, 5, 0, 5) };
-            _btnToggleHidden = new ToolStripButton("显示隐藏") { Image = CreateToolbarIcon("eye"),
-                ToolTipText = "临时显示普通隐藏工作表" };
+            _btnToggleHidden = new ToolStripButton { Image = CreateToolbarIcon("eye") };
+            UpdateHiddenSheetsButton();
             _btnRecentSheets = new ToolStripButton("最近两表") { Image = CreateToolbarIcon("switch"),
                 ToolTipText = "切换最近使用的两张工作表", Enabled = false, Alignment = ToolStripItemAlignment.Right };
             sheetActions.Items.AddRange(new ToolStripItem[] { _btnToggleHidden, _btnRecentSheets });
@@ -570,7 +606,23 @@ namespace ExcelNavigatorPane
             worksheetPanel.Controls.Add(searchStrip);
             worksheetPanel.Controls.Add(_wsToolStrip);
             worksheetPanel.Controls.Add(worksheetBottomPanel);
+            _workbookSplitter = new Splitter
+            {
+                Dock = DockStyle.Top, Height = 6, BackColor = ColorBorderLight,
+                Cursor = Cursors.HSplit, AccessibleName = "工作簿区域分隔线",
+                AccessibleDescription = "拖动调整高度，双击恢复自动高度"
+            };
+            _workbookSplitter.SplitterMoved += (sender, args) =>
+            {
+                if (!_updatingWorkbookLayout) _manualWorkbookHeight = _workbookPanel.Height;
+            };
+            _workbookSplitter.DoubleClick += (sender, args) =>
+            {
+                _manualWorkbookHeight = null;
+                UpdateWorkbookLayout();
+            };
             mainPanel.Controls.Add(worksheetPanel);
+            mainPanel.Controls.Add(_workbookSplitter);
             mainPanel.Controls.Add(_workbookPanel);
             mainPanel.SizeChanged += (sender, args) => UpdateWorkbookLayout();
             this.Controls.Add(mainPanel);
@@ -588,51 +640,139 @@ namespace ExcelNavigatorPane
                 "无法刷新工作表列表",
                 () => RefreshWorksheets(reportErrors: true));
             _btnToggleHidden.Click += (sender, args) => ToggleHiddenSheets();
+            _btnListHiddenSheets.Click += (sender, args) => RunUserAction(
+                "无法筛选隐藏工作表", ToggleListedHiddenSheets);
             _btnRecentSheets.Click += (sender, args) => ToggleRecentSheets();
             _txtFilter.TextChanged += (sender, args) => RefreshWorksheets();
             help.Click += (sender, args) => ShowInformation(
-                "Excel Navigator\n工作簿和表导航模块");
+                "Excel Navigator " + UpdateChecker.CurrentVersion + "\n工作簿和表导航模块");
 
             InitializeContextMenus();
         }
 
+        private bool ShouldListWorksheet(string name, Excel.XlSheetVisibility visibility, string filter)
+        {
+            return (_btnListHiddenSheets.Checked || visibility == Excel.XlSheetVisibility.xlSheetVisible) &&
+                   name.Length > 0 &&
+                   (filter.Length == 0 || name.IndexOf(filter, StringComparison.CurrentCultureIgnoreCase) >= 0);
+        }
+
+        private void UpdateListedHiddenSheetsButton()
+        {
+            _btnListHiddenSheets.Text = _btnListHiddenSheets.Checked ? "仅看可见表" : "查看全部表";
+            _btnListHiddenSheets.AccessibleName = _btnListHiddenSheets.Text;
+            _btnListHiddenSheets.ToolTipText = _btnListHiddenSheets.Checked
+                ? "导航列表仅显示可见工作表，不改变 Sheet 的隐藏状态；名称搜索仍生效。"
+                : "导航列表包含可见、隐藏和深度隐藏工作表，不改变 Sheet 的隐藏状态；名称搜索仍生效。";
+        }
+
+        private void ToggleListedHiddenSheets()
+        {
+            EnsureReady();
+            _btnListHiddenSheets.Checked = !_btnListHiddenSheets.Checked;
+            RefreshWorksheets(reportErrors: true);
+        }
+
         private void UpdateWorkbookLayout()
         {
-            if (_workbookPanel == null || _lbWorkbooks == null) return;
-            int desired = _wbToolStrip.Height + _workbookPanel.Padding.Vertical + Math.Max(1, Math.Min(5, _lbWorkbooks.Items.Count)) * _lbWorkbooks.ItemHeight;
-            _workbookPanel.Height = Math.Min(desired, Math.Max(_wbToolStrip.Height + _lbWorkbooks.ItemHeight + _workbookPanel.Padding.Vertical, ClientSize.Height / 3));
+            if (_workbookPanel == null || _lbWorkbooks == null || _workbookSplitter == null) return;
+            int header = _wbToolStrip.Height + _workbookPanel.Padding.Vertical;
+            int minimum = header + _lbWorkbooks.ItemHeight;
+            Control worksheetPanel = _lbWorksheets.Parent;
+            int worksheetMinimum = worksheetPanel.Padding.Vertical + 3 * _lbWorksheets.ItemHeight;
+            foreach (Control child in worksheetPanel.Controls)
+                if (child.Dock == DockStyle.Top || child.Dock == DockStyle.Bottom) worksheetMinimum += child.Height;
+            int available = Math.Max(0, ClientSize.Height - _workbookSplitter.Height);
+            int maximum = Math.Max(0, available - worksheetMinimum);
+            minimum = Math.Min(minimum, maximum);
+            int desired = _manualWorkbookHeight ?? (header + Math.Max(5, _lbWorkbooks.Items.Count) * _lbWorkbooks.ItemHeight);
+            _updatingWorkbookLayout = true;
+            try
+            {
+                _workbookSplitter.MinSize = minimum;
+                _workbookSplitter.MinExtra = Math.Min(worksheetMinimum, available - minimum);
+                _workbookPanel.Height = Math.Max(minimum, Math.Min(desired, maximum));
+            }
+            finally { _updatingWorkbookLayout = false; }
         }
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr SendMessage(IntPtr hwnd, int message, IntPtr parameter, string text);
 
-        private static void DrawSheetIcon(Graphics graphics, Rectangle bounds, bool active)
+        private static void DrawNavigationIcon(Graphics graphics, Rectangle bounds, string name, Color color)
         {
-            using (var pen = new Pen(active ? ColorExcelGreen : ColorTextSub, 1f))
+            GraphicsState state = graphics.Save();
+            try
             {
-                int x = bounds.X, y = bounds.Y;
-                graphics.DrawLines(pen, new[] { new Point(x, y + 15), new Point(x, y), new Point(x + 8, y),
-                    new Point(x + 13, y + 5), new Point(x + 13, y + 15), new Point(x, y + 15) });
-                graphics.DrawLines(pen, new[] { new Point(x + 8, y), new Point(x + 8, y + 5), new Point(x + 13, y + 5) });
-                graphics.DrawLine(pen, x + 3, y + 8, x + 10, y + 8);
-                graphics.DrawLine(pen, x + 3, y + 11, x + 10, y + 11);
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                graphics.TranslateTransform(bounds.X, bounds.Y);
+                graphics.ScaleTransform(bounds.Width / 16f, bounds.Height / 16f);
+                using (var pen = new Pen(color, 1.4f) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round })
+                {
+                    switch (name)
+                    {
+                        case "book":
+                            graphics.DrawRectangle(pen, 2, 2, 12, 12);
+                            graphics.DrawLine(pen, 5, 2, 5, 14);
+                            graphics.DrawLine(pen, 8, 6, 11, 6);
+                            graphics.DrawLine(pen, 8, 9, 11, 9);
+                            break;
+                        case "sheet":
+                            graphics.DrawRectangle(pen, 2, 2, 12, 12);
+                            graphics.DrawLine(pen, 2, 6, 14, 6);
+                            graphics.DrawLine(pen, 2, 10, 14, 10);
+                            graphics.DrawLine(pen, 6, 6, 6, 14);
+                            break;
+                        case "add":
+                            graphics.DrawLine(pen, 8, 3, 8, 13);
+                            graphics.DrawLine(pen, 3, 8, 13, 8);
+                            break;
+                        case "search":
+                            graphics.DrawEllipse(pen, 2, 2, 8, 8);
+                            graphics.DrawLine(pen, 9, 9, 13.5f, 13.5f);
+                            break;
+                        case "refresh":
+                            graphics.DrawArc(pen, 2.5f, 2.5f, 11, 11, 45, 285);
+                            graphics.DrawLines(pen, new[] { new PointF(13.5f, 2), new PointF(13.5f, 6), new PointF(9.5f, 6) });
+                            break;
+                        case "switch":
+                            graphics.DrawLines(pen, new[] { new Point(2, 5), new Point(13, 5), new Point(10, 2) });
+                            graphics.DrawLines(pen, new[] { new Point(14, 11), new Point(3, 11), new Point(6, 14) });
+                            break;
+                        case "eye":
+                        case "eye-off":
+                            graphics.DrawBezier(pen, 1.5f, 8, 5, 2.5f, 11, 2.5f, 14.5f, 8);
+                            graphics.DrawBezier(pen, 1.5f, 8, 5, 13.5f, 11, 13.5f, 14.5f, 8);
+                            graphics.DrawEllipse(pen, 6, 6, 4, 4);
+                            if (name == "eye-off") graphics.DrawLine(pen, 2, 14, 14, 2);
+                            break;
+                        case "lock":
+                        case "unlock":
+                            graphics.DrawRectangle(pen, 3, 7, 10, 7);
+                            graphics.DrawArc(pen, name == "lock" ? 5 : 8, 1.5f, 6, 7, 180, 180);
+                            graphics.DrawLine(pen, name == "lock" ? 5 : 8, 5, name == "lock" ? 5 : 8, 7);
+                            if (name == "lock") graphics.DrawLine(pen, 11, 5, 11, 7);
+                            graphics.DrawLine(pen, 8, 10, 8, 11.5f);
+                            break;
+                        case "close":
+                            graphics.DrawLine(pen, 4, 4, 12, 12);
+                            graphics.DrawLine(pen, 12, 4, 4, 12);
+                            break;
+                        case "more":
+                            using (var brush = new SolidBrush(color))
+                                for (int x = 3; x <= 13; x += 5) graphics.FillEllipse(brush, x - 1, 7, 2, 2);
+                            break;
+                    }
+                }
             }
+            finally { graphics.Restore(state); }
         }
 
         private Image CreateToolbarIcon(string name)
         {
             var image = new Bitmap(16, 16);
             using (Graphics g = Graphics.FromImage(image))
-            using (var pen = new Pen(ColorTextSub, 1.5f))
-            {
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                if (name == "add") { g.DrawLine(pen, 8, 3, 8, 13); g.DrawLine(pen, 3, 8, 13, 8); }
-                else if (name == "search") { g.DrawEllipse(pen, 2, 2, 8, 8); g.DrawLine(pen, 9, 9, 14, 14); }
-                else if (name == "refresh") { g.DrawArc(pen, 3, 3, 10, 10, 40, 290); g.DrawLines(pen, new[] { new Point(13, 2), new Point(13, 6), new Point(9, 6) }); }
-                else if (name == "switch") { g.DrawLines(pen, new[] { new Point(2, 5), new Point(13, 5), new Point(10, 2) }); g.DrawLines(pen, new[] { new Point(14, 11), new Point(3, 11), new Point(6, 14) }); }
-                else if (name == "eye") { g.DrawEllipse(pen, 1, 4, 14, 8); g.DrawEllipse(pen, 6, 6, 4, 4); }
-                else { using (var brush = new SolidBrush(ColorTextSub)) for (int x = 3; x <= 13; x += 5) g.FillEllipse(brush, x - 1, 7, 2, 2); }
-            }
+                DrawNavigationIcon(g, new Rectangle(0, 0, 16, 16), name, ColorTextSub);
             _toolbarImages.Add(image);
             return image;
         }
@@ -717,7 +857,7 @@ namespace ExcelNavigatorPane
                 }
             }
 
-            DrawSheetIcon(e.Graphics, new Rectangle(e.Bounds.Left + 10, e.Bounds.Top + (e.Bounds.Height - 16) / 2, 14, 16), item.IsActive);
+            DrawNavigationIcon(e.Graphics, new Rectangle(e.Bounds.Left + 9, e.Bounds.Top + (e.Bounds.Height - 16) / 2, 16, 16), "book", item.IsActive ? ColorExcelGreen : ColorTextSub);
             if ((e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
 
             Font font = item.IsActive ? _boldFont : e.Font;
@@ -731,13 +871,10 @@ namespace ExcelNavigatorPane
                 TextFormatFlags.Left |
                 TextFormatFlags.EndEllipsis);
 
-            if (item.IsActive || hovered)
+            if (item.IsActive || hovered || (e.State & DrawItemState.Focus) != 0)
             {
                 Rectangle closeRect = GetWbCloseRect(e.Bounds);
-                DrawCloseIcon(
-                    e.Graphics,
-                    closeRect,
-                    closeRect.Contains(_mouseLocWb) ? Color.Red : ColorTextSub);
+                DrawRowAction(e.Graphics, closeRect, "close", closeRect.Contains(_mouseLocWb));
             }
         }
 
@@ -763,7 +900,7 @@ namespace ExcelNavigatorPane
                 }
             }
 
-            DrawSheetIcon(e.Graphics, new Rectangle(e.Bounds.Left + 10, e.Bounds.Top + (e.Bounds.Height - 16) / 2, 14, 16), item.IsActive);
+            DrawNavigationIcon(e.Graphics, new Rectangle(e.Bounds.Left + 9, e.Bounds.Top + (e.Bounds.Height - 16) / 2, 16, 16), "sheet", item.IsActive ? ColorExcelGreen : ColorTextSub);
             if ((e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
 
             Font font = item.IsActive ? _boldFont : e.Font;
@@ -779,15 +916,15 @@ namespace ExcelNavigatorPane
 
             Rectangle eyeRect = GetWsEyeRect(e.Bounds);
             Rectangle lockRect = GetWsLockRect(e.Bounds);
-            if (hovered || (e.State & DrawItemState.Focus) != 0 || item.Visibility != Excel.XlSheetVisibility.xlSheetVisible) DrawFluentEye(
+            if (hovered || (e.State & DrawItemState.Focus) != 0 || item.Visibility != Excel.XlSheetVisibility.xlSheetVisible) DrawRowAction(
                 e.Graphics,
                 eyeRect,
-                item.Visibility == Excel.XlSheetVisibility.xlSheetVisible,
+                item.Visibility == Excel.XlSheetVisibility.xlSheetVisible ? "eye" : "eye-off",
                 eyeRect.Contains(_mouseLocWs));
-            if (hovered || (e.State & DrawItemState.Focus) != 0 || item.IsProtected) DrawFluentLock(
+            if (hovered || (e.State & DrawItemState.Focus) != 0 || item.IsProtected) DrawRowAction(
                 e.Graphics,
                 lockRect,
-                item.IsProtected,
+                item.IsProtected ? "lock" : "unlock",
                 lockRect.Contains(_mouseLocWs));
         }
 
@@ -930,61 +1067,18 @@ namespace ExcelNavigatorPane
             }
         }
 
-        private static void DrawCloseIcon(Graphics graphics, Rectangle bounds, Color color)
+        private static void DrawRowAction(Graphics graphics, Rectangle bounds, string name, bool hovered)
         {
-            graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            const int width = 8;
-            int x = bounds.X + (bounds.Width - width) / 2;
-            int y = bounds.Y + (bounds.Height - width) / 2;
-            using (var pen = new Pen(color, 1.5f))
+            Color color = ColorTextSub;
+            if (hovered)
             {
-                graphics.DrawLine(pen, x, y, x + width, y + width);
-                graphics.DrawLine(pen, x + width, y, x, y + width);
+                bool close = name == "close";
+                color = close ? Color.FromArgb(179, 38, 30) : ColorExcelGreen;
+                using (var brush = new SolidBrush(close ? Color.FromArgb(253, 235, 233) : ColorKutoolsActive))
+                    graphics.FillRectangle(brush, bounds.X + 1, bounds.Y + (bounds.Height - 22) / 2, bounds.Width - 2, 22);
             }
-        }
-
-        private static void DrawFluentEye(Graphics graphics, Rectangle bounds, bool visible, bool hovered)
-        {
-            graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            const int width = 14;
-            const int height = 8;
-            int x = bounds.X + (bounds.Width - width) / 2;
-            int y = bounds.Y + (bounds.Height - height) / 2 + 1;
-            Color color = hovered ? Color.DodgerBlue : (visible ? ColorTextMain : ColorTextSub);
-
-            using (var pen = new Pen(color, 1.2f))
-            {
-                graphics.DrawArc(pen, x, y - 2, width, 12, 190, 160);
-                graphics.DrawArc(pen, x, y - 2, width, 12, 10, 160);
-                using (var brush = new SolidBrush(color))
-                {
-                    graphics.FillEllipse(brush, x + width / 2 - 2, y + height / 2 - 2, 4, 4);
-                }
-
-                if (!visible) graphics.DrawLine(pen, x - 1, y + height, x + width + 1, y);
-            }
-        }
-
-        private static void DrawFluentLock(Graphics graphics, Rectangle bounds, bool protectedSheet, bool hovered)
-        {
-            graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            const int width = 9;
-            const int height = 7;
-            int x = bounds.X + (bounds.Width - width) / 2;
-            int y = bounds.Y + (bounds.Height - height) / 2 + 2;
-            Color color = hovered ? Color.DodgerBlue : (protectedSheet ? ColorTextMain : ColorTextSub);
-
-            using (var pen = new Pen(color, 1.2f))
-            {
-                graphics.DrawRectangle(pen, x, y, width, height);
-                graphics.DrawArc(pen, x + 1, y - 4, width - 2, 7, 180, 180);
-                graphics.DrawLine(pen, x + 1, y - 1, x + 1, y);
-                if (protectedSheet)
-                {
-                    graphics.DrawLine(pen, x + width - 1, y - 1, x + width - 1, y);
-                    graphics.DrawLine(pen, x + width / 2, y + 2, x + width / 2, y + 4);
-                }
-            }
+            DrawNavigationIcon(graphics,
+                new Rectangle(bounds.X + (bounds.Width - 16) / 2, bounds.Y + (bounds.Height - 16) / 2, 16, 16), name, color);
         }
 
         private void ToggleWorkbookSort(WorkbookSortMode requested)
@@ -1260,14 +1354,25 @@ namespace ExcelNavigatorPane
             bool ready = IsReadyForCommands();
             if (ready)
             {
+                // Resolve from the live collection; a cached Window can outlive its HWND.
+                Excel.Window target = null;
+                foreach (Excel.Window window in item.Workbook.Windows)
+                {
+                    if (!window.Visible) continue;
+                    if (target == null) target = window;
+                    if (new IntPtr(window.Hwnd) == item.Hwnd) { target = window; break; }
+                }
+                if (target == null) throw new InvalidOperationException("目标工作簿没有可见窗口，请刷新列表。");
+                item.Window = target;
+                item.Hwnd = new IntPtr(target.Hwnd);
+                ValidateExcelWindow(item.Hwnd, _excelProcessId);
                 item.Window.Activate();
-                return;
             }
 
             IntPtr hwnd = item.Hwnd;
             uint processId = _excelProcessId;
             await Task.Run(() => ForegroundExcelWindow(hwnd, processId));
-            RefreshAfterEdit();
+            if (!ready) RefreshAfterEdit();
         }
         private async Task NavigateWorksheetAsync(WsItem item)
         {
@@ -1305,6 +1410,10 @@ namespace ExcelNavigatorPane
         private static extern bool SetForegroundWindow(IntPtr hwnd);
         [DllImport("user32.dll")]
         private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")]
+        private static extern bool IsIconic(IntPtr hwnd);
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindowAsync(IntPtr hwnd, int command);
 
         private static void ValidateExcelWindow(IntPtr hwnd, uint processId)
         {
@@ -1320,7 +1429,17 @@ namespace ExcelNavigatorPane
         private static void ForegroundExcelWindow(IntPtr hwnd, uint processId)
         {
             ValidateExcelWindow(hwnd, processId);
-            if (!SetForegroundWindow(hwnd))
+            if (IsIconic(hwnd))
+            {
+                // SetForegroundWindow alone does not restore a minimized Excel window.
+                if (!ShowWindowAsync(hwnd, 9)) // SW_RESTORE: retain the previous normal/maximized placement.
+                    throw new InvalidOperationException("无法恢复目标 Excel 窗口。");
+                var restoreTimer = Stopwatch.StartNew();
+                while (IsIconic(hwnd) && restoreTimer.ElapsedMilliseconds < 1000) Thread.Sleep(10);
+                ValidateExcelWindow(hwnd, processId);
+                if (IsIconic(hwnd)) throw new InvalidOperationException("目标 Excel 窗口尚未恢复，请重试。");
+            }
+            if (!SetForegroundWindow(hwnd) && GetForegroundWindow() != hwnd)
                 throw new InvalidOperationException("Excel 未允许切换到目标窗口。");
 
             // The /x probe showed that foreground activation can complete after the API returns.
@@ -1517,17 +1636,18 @@ namespace ExcelNavigatorPane
         {
             if (_btnToggleHidden == null) return;
             bool restore = _addIn != null && _addIn.IsHiddenSheetsShown(_workbook);
-            _btnToggleHidden.Text = restore ? "恢复隐藏" : "显示隐藏";
+            _btnToggleHidden.Text = restore ? "恢复隐藏" : "取消隐藏";
+            _btnToggleHidden.AccessibleName = _btnToggleHidden.Text;
             _btnToggleHidden.ToolTipText = restore
-                ? "恢复本次临时显示的工作表"
-                : "临时显示普通隐藏工作表";
+                ? "将本次临时取消隐藏的工作表恢复为隐藏状态，Excel 底部标签也会隐藏；不影响深度隐藏表。"
+                : "临时取消当前工作簿中普通工作表的隐藏状态，使其显示在 Excel 底部标签中；可再次点击恢复，不影响深度隐藏表。";
         }
 
         private string GetHiddenSheetsCommandText()
         {
             return _addIn != null && _addIn.IsHiddenSheetsShown(_workbook)
                 ? "恢复隐藏工作表"
-                : "显示隐藏工作表";
+                : "取消隐藏工作表";
         }
 
         private void UpdateRecentSheetsButton()

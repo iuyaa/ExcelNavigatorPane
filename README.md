@@ -6,10 +6,12 @@ ExcelNavigatorPane 是一个基于 VSTO、WinForms 与 Excel Interop 的 Excel �
 
 ### 导航布局
 
-- 工作簿区按内容收缩，最多展示约五行并受窗格高度限制，其余空间留给工作表列表
+- 工作簿区默认预留五行，超过五个时自动增高；达到窗格可用高度后才在列表内滚动，并为工作表工具栏和至少三行工作表保留空间（窗格高度足够时）
+- 拖动两区之间的分隔线可手动调整高度；当前窗格会保留手动高度，刷新不会覆盖，双击分隔线恢复自动高度
 - 工作表搜索独占一行，输入框随窗格宽度调整
 - 新建工作簿保留快捷入口，排序、保存等操作集中在工作簿菜单
 - 统一文字、行高与线性图标；隐藏和受保护状态常显，普通行操作在悬停或键盘聚焦时显示
+- 工作簿使用装订册图标，工作表使用网格图标；工具栏与行内按钮共用圆角线条图标，普通操作悬停为绿色，关闭按钮为红色。当前工作簿的关闭入口也保持显示。
 
 
 ### 多窗口
@@ -31,6 +33,8 @@ ExcelNavigatorPane 是一个基于 VSTO、WinForms 与 Excel Interop 的 Excel �
 ### 工作表
 
 - 列出所属工作簿中的 Worksheet、筛选名称并高亮当前窗口的活动表
+- 默认列出隐藏表，标题栏按钮显示下一步操作“仅看可见表”；点击后列表和名称搜索仅显示可见工作表，按钮变为“查看全部表”。此开关仅过滤当前窗格，不改变 Sheet 的隐藏状态，底部数量仍按工作簿实际状态统计。
+- “取消隐藏 / 恢复隐藏”会改变 Excel 中普通工作表的隐藏状态；这组按钮与列表筛选按钮的悬停提示均随状态切换，说明点击后的作用。
 - 显示工作表总数、可见数与隐藏数
 - 单击工作表名称切换工作表
 - 单击眼睛图标切换普通 Visible/Hidden 状态
@@ -95,7 +99,56 @@ ExcelNavigatorPane 是一个基于 VSTO、WinForms 与 Excel Interop 的 Excel �
 msbuild .\ExcelNavigatorPane.csproj /t:Rebuild /p:Configuration=Debug /p:Platform=AnyCPU
 ```
 
-当前仓库主要用于开发调试，未提供独立安装包或 ClickOnce 发布流程。
+### 内部试用安装包
+
+运行 `./installer/Build-Installer.ps1` 可发布 Release/ClickOnce 并生成 `dist/ExcelNavigator-Setup-1.0.0.2.exe`，接收方只需这个 EXE；同时生成可供上传的完整发布 ZIP。安装时保存并关闭 Excel，缺少 .NET Framework 4.8 或 VSTO Runtime 时联网安装依赖。详细步骤见生成目录中的 `安装说明.txt`。
+
+脚本默认在当前用户证书库中创建或复用内部代码签名证书，不写入受信任根或受信任发布者，不更改项目的开发签名配置。正式证书可用 `-CertificateThumbprint` 指定，构建工具位置可用 `-MSBuild` 指定。输出目录 `dist/` 为生成物。
+
+单文件启动器将安装源解包到 `%LOCALAPPDATA%/ExcelNavigatorPane/Installer`，再启动微软生成的安装程序；插件安装和卸载由 VSTO/ClickOnce 处理。安装器面向 Windows 10/11，其他 Excel 版本及 x86 仍需实机验证。
+
+打包脚本会运行仅解包检查，逐文件比对发布内容的 SHA-256，不在开发机执行安装或修改 Excel 注册。当前已通过这些检查；无开发环境电脑上的安装、加载和卸载为 **NOT_RUN**。内部自签名证书可能触发发布者信任提示或被公司策略阻止，正式分发需使用组织认可的签名方案。
+
+### 更新功能
+
+- 工作簿右上角菜单提供“检查更新”，异步查询版本，最多等待 10 秒；“关于导航栏”显示当前发布版本。
+- 未配置更新地址时明确提示，且不发出网络请求。手动检查只读取清单版本，不下载或执行程序；网页、错误产品清单、非 HTTPS 地址和临时签名 URL 不作为更新来源。
+- 发布时传入 `-UpdateBaseUrl`（固定 HTTPS 目录），VSTO 清单启用每次加载时检查更新；安装程序从该在线地址安装，Office 后续也沿用这个源。插件不会在用户工作期间关闭或重启 Excel。手动发现新版后提示保存工作、关闭所有 Excel 窗口并重新打开。
+- 未传地址时，EXE 保持本地安装模式，自动更新关闭。不能把当前 OneView 首页当作文件更新源。
+
+```powershell
+# 当前可生成未配置地址的包
+.\installer\Build-Installer.ps1 -Version 1.0.0.2
+
+# 生成带正式更新地址的发布包
+.\installer\Build-Installer.ps1 -Version 1.0.0.2 -UpdateBaseUrl 'https://oneview.jiarui.net.cn/excel-navigation/'
+```
+
+发布后将 `ExcelNavigator-Publish-版本号.zip` 解压上传到配置目录：先上传 `Application Files` 中的新版本文件，最后覆盖根目录 `ExcelNavigatorPane.vsto`；保留旧版目录，不修改已签名的清单或程序集。每次发布递增版本号、沿用同一签名证书及固定地址。入口清单应避免长期缓存，并设置 `.vsto` 类型为 `application/x-ms-vsto`。
+
+旧的离线来源安装用户需要先安装一次带在线地址且版本号更高的包；已安装加载项的来源迁移仍需独立电脑验收，不保证仅替换 EXE 即完成迁移。
+
+更新检查的解析/地址校验见 `tests/UpdateCheck.cs`；发布 ZIP 中的版本、原生更新标记、签名存在及安装源检查见 `tests/UpdatePublishCheck.ps1`。这些检查不等于真实升级验收：从旧版安装 → 发布新版 → 重启 Excel 加载新版、断网启动及证书不受信任时的行为均为 **NOT_RUN**，待本版安装后在独立环境执行。
+
+### 发布流程
+
+RustFS 发布脚本复用同一批构建产物，默认仅预览；验证通过后加 `--apply` 上传并逐文件校验匿名下载，最后更新入口清单。版本文件已存在但内容不同会拒绝覆盖：
+
+```powershell
+python installer/Publish-RustFS.py --version 1.0.0.2 --directory dist/releases/1.0.0.2
+python installer/Publish-RustFS.py --version 1.0.0.2 --directory dist/releases/1.0.0.2 --apply
+```
+
+后续每次发布均包含以下步骤，更新日志统一维护在 [CHANGELOG.md](CHANGELOG.md)：
+
+1. 确定递增的四段版本号，将“未发布”内容整理为该版本和发布日期，写明用户可见变化、验证结果及已知限制。
+2. 完成相关构建和检查，提交本次发布源码与更新日志并推送 GitHub。排除凭据、私钥、生成物和无关本地修改。
+3. 从该提交构建安装包，显式指定版本、正式 `UpdateBaseUrl` 和沿用的签名证书；验证产物。创建指向该提交的 `v版本号` 标签并推送。
+4. 创建 GitHub Release 草稿，说明取自该版本更新日志；附上 EXE、EXE 的 SHA-256 文件、完整发布 ZIP 和安装说明。后续 RustFS 上传复用同一批产物。
+5. 将发布 ZIP 解压后的目录结构上传至 RustFS 的 `excel-navigation` 桶内固定更新目录。先上传新版本 `Application Files` 并校验下载内容，再上传根目录安装资源，最后覆盖 `ExcelNavigatorPane.vsto`。保留旧版目录，不使用删除同步。入口清单避免长期缓存；签名文件保持原样。
+6. 从用户使用的 HTTPS 地址验证匿名下载、清单版本及文件完整性，再发布 Release。首次接入先发布内部试用预发布版，明确未完成的实机验收；独立环境的安装及旧版升级验收通过后再发布稳定版。报告提交、标签、Release 链接、下载地址和实际验证结果。
+
+正式更新目录为 `https://oneview.jiarui.net.cn/excel-navigation/`，S3 Endpoint 为同域名根地址，凭据保存在 Git 忽略的本机 `.env`。2026-09-11 已通过真实上传、覆盖、签名/匿名下载及权限检查：`python tests/RustFSUploadCheck.py`（需本机已安装 boto3、python-dotenv、requests；每次仅新增一组小型诊断对象并保留）。详情见 [RustFS 接入说明](installer/RustFS接入说明.md)。1.0.0.2 为首个在线更新试用版；真实 Excel 升级验收尚未执行；任一步失败应保留已完成步骤的记录，修复后继续，不重复发布同版本的不同产物。
 
 ## 手工验收清单
 
@@ -125,6 +178,7 @@ msbuild .\ExcelNavigatorPane.csproj /t:Rebuild /p:Configuration=Debug /p:Platfor
 ### 工作表命令
 
 - 筛选、活动项高亮与总数/可见数/隐藏数正确
+- “仅看可见表 / 查看全部表”按钮文字随状态切换，并与名称搜索共同生效；关闭后 Hidden/VeryHidden 均不列出，重新选中后恢复，实际隐藏状态及底部计数不变
 - 普通 Hidden 可通过眼睛图标显示；Visible 可在满足至少一张可见 Sheet 时隐藏
 - VeryHidden 不被修改；工作簿结构保护时可见性操作被阻止
 - 锁图标打开 Excel 原生保护/取消保护流程，取消不会导致导航栏异常
@@ -132,9 +186,9 @@ msbuild .\ExcelNavigatorPane.csproj /t:Rebuild /p:Configuration=Debug /p:Platfor
 
 ### 批量隐藏恢复
 
-- 准备 Visible、Hidden、VeryHidden 工作表；“显示隐藏”只显示普通 Hidden
+- 准备 Visible、Hidden、VeryHidden 工作表；“取消隐藏”只显示普通 Hidden
 - “恢复隐藏”仅恢复本次快照中的工作表，VeryHidden 始终不变
-- 同一工作簿的两个窗口同步显示“显示隐藏/恢复隐藏”状态
+- 同一工作簿的两个窗口同步显示“取消隐藏/恢复隐藏”状态
 - 临时显示期间 SaveAs 或重命名后仍可恢复
 - 删除快照内工作表或取消关闭工作簿后，恢复操作不会丢失其他有效状态
 
@@ -158,5 +212,5 @@ msbuild .\ExcelNavigatorPane.csproj /t:Rebuild /p:Configuration=Debug /p:Platfor
 - 当前没有自动化测试项目；窗口、对话框和 COM 事件行为需要在真实 Excel 中验收
 - 导航列表只覆盖 Worksheet，不列出图表工作表等其他 Sheet 类型
 - 工作簿重命名本质上是 Excel `SaveAs`，覆盖确认、格式兼容和路径长度错误由 Excel 处理
-- About 内容为固定说明，不与程序集版本自动同步
+- “关于导航栏”显示打包时的发布版本；本地开发构建默认不启用自动更新
 - 当前只实现“工作簿和表”模块，不承诺与 Kutools 其他模块或视觉资产兼容

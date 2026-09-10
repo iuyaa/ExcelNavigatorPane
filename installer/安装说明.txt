@@ -1,0 +1,26 @@
+Excel Navigator 内部试用版
+
+适用环境：Windows 10/11 桌面版 Microsoft Excel。
+目前已验证开发机 Excel x64；其他电脑及 Excel x86 需试用验证。
+不支持 Mac、网页版 Excel 或 WPS。无需安装 Visual Studio。
+
+安装：
+1. 保存工作并关闭 Excel。
+2. 双击 ExcelNavigator-Setup-{VERSION}.exe，按提示继续。
+3. 缺少 .NET Framework 4.8 或 VSTO Runtime 时，安装程序会联网下载依赖，可能要求管理员权限或重启。
+4. 确认安装来源后，在 VSTO 安装提示中完成安装。
+5. 重新打开 Excel，检查导航栏；也可在“文件 → 选项 → 加载项 → COM 加载项”中查看 ExcelNavigatorPane。
+
+此版本使用开发测试证书，可能显示发布者未知或信任提示。
+如果公司策略阻止安装，请交给 IT 确认证书和加载项策略，不要关闭 Office 安全保护。
+安装程序不会自动导入根证书、关闭 Excel 或修改 Office 安全策略。
+
+卸载：在 Windows“控制面板 → 程序和功能”中找到 ExcelNavigatorPane 并卸载。
+安装源保存在 %LOCALAPPDATA%\ExcelNavigatorPane\Installer；此目录仅为安装缓存，卸载后可自行删除。
+{UPDATE_STATUS}
+配置更新地址的版本由 Office/VSTO 在启动时检查更新；使用过程中不会由插件强制关闭或重启 Excel。
+导航栏工作簿菜单“检查更新”可手动查询版本；此操作仅查询，不安装，发现新版后请在方便时保存工作、关闭所有 Excel 窗口并重新打开。
+旧安装包未配置在线地址的用户，需要先运行一次配置好更新地址的新安装包。
+
+本包已验证发布、签名存在、解包以及文件校验；尚未完成无开发环境电脑的实际安装/加载/卸载验收。
+首次建议只发给一位同事试装。遇到失败，请记录错误全文以及 Windows、Excel 版本和位数。
