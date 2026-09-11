@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Version = '1.0.10.0',
+    [string]$Version = '1.0.11.0',
     [ValidateSet('oneview','github')][string]$UpdateChannel = 'oneview',
     [string]$ChannelsFile = (Join-Path $PSScriptRoot 'UpdateChannels.json'),
     [string]$UpdateBaseUrl,
@@ -87,7 +87,7 @@ foreach ($arch in @('x86','x64')) {
     $programFiles = if ($arch -eq 'x64') { 'ProgramFiles64Folder' } else { 'ProgramFilesFolder' }
     & $Wix build (Join-Path $PSScriptRoot 'Product.wxs') $groups -arch $arch -d "MsiVersion=$($parsed.Major).$($parsed.Minor).$($parsed.Build)" -d "ProgramFiles=$programFiles" -d "PayloadInclude=$include" -o $msi
     if ($LASTEXITCODE -ne 0) { throw "MSI build failed: $arch" }
-    & $MSBuild (Join-Path $PSScriptRoot 'Bootstrapper.proj') /t:Build "/p:MsiFile=$msiName" "/p:BootstrapOutput=$folder" "/p:BootstrapperPath=$BootstrapperPath" /nologo /verbosity:minimal
+    & $MSBuild (Join-Path $PSScriptRoot 'Bootstrapper.proj') /t:Build "/p:BootstrapOutput=$folder" "/p:BootstrapperPath=$BootstrapperPath" /nologo /verbosity:minimal
     if ($LASTEXITCODE -ne 0 -or !(Test-Path (Join-Path $folder 'setup.exe'))) { throw 'Microsoft prerequisite bootstrapper failed.' }
     Copy-Item $msi (Join-Path $dist $msiName)
 }

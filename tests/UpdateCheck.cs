@@ -112,6 +112,17 @@ class UpdateCheck
             try { SetupLauncher.WaitForOfficeClosed(() => true, () => System.Windows.Forms.DialogResult.Cancel); }
             catch (OperationCanceledException) { cancelled = true; }
             Require(cancelled);
+            Require(SetupLauncher.InstallationResultMessage(0).Contains("安装成功"));
+            Require(SetupLauncher.InstallationResultMessage(1602) == null);
+            Require(SetupLauncher.InstallationResultMessage(3010).Contains("重启"));
+            Require(SetupLauncher.InstallationResultMessage(1641).Contains("重启"));
+            foreach (int code in new[] { 1603, 1618, -1 })
+            {
+                bool failed = false;
+                try { SetupLauncher.InstallationResultMessage(code); }
+                catch (InvalidOperationException) { failed = true; }
+                Require(failed);
+            }
             const string installedManifest = "file:///C:/Program Files/ExcelNavigatorPane/ExcelNavigatorPane.vsto|vstolocal";
             Require(!SetupLauncher.HasConflictingRegistration(null, installedManifest));
             Require(!SetupLauncher.HasConflictingRegistration("", installedManifest));

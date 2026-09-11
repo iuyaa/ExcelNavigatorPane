@@ -4,8 +4,8 @@
     <Prerequisite Include="Microsoft.VSTORuntime.4.0"><Install>true</Install></Prerequisite>
   </ItemGroup>
   <Target Name="Build">
-    <GenerateBootstrapper ApplicationFile="$(MsiFile)" ApplicationName="Excel Navigator"
-        BootstrapperItems="@(Prerequisite)" ComponentsLocation="HomeSite" CopyComponents="false"
+    <!-- Install prerequisites only; SetupLauncher waits for msiexec and reports its actual result. -->
+    <GenerateBootstrapper BootstrapperItems="@(Prerequisite)" ComponentsLocation="HomeSite" CopyComponents="false"
         Culture="zh-Hans" FallbackCulture="en" OutputPath="$(BootstrapOutput)"
         Path="$(BootstrapperPath)" />
   </Target>

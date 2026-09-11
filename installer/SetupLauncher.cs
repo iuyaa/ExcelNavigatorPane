@@ -70,13 +70,25 @@ internal static class SetupLauncher
                     { WorkingDirectory = folder, UseShellExecute = true }))
                 {
                     setup.WaitForExit();
-                    return setup.ExitCode;
+                    if (setup.ExitCode != 0) return setup.ExitCode;
+                }
+                EnsureOfficeClosed();
+                string msi = Path.Combine(folder, "ExcelNavigator-" + Assembly.GetExecutingAssembly().GetName().Version + "-" + architecture + ".msi");
+                using (var install = Process.Start(new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "msiexec.exe"),
+                    "/i \"" + msi + "\" /passive /norestart") { WorkingDirectory = folder, UseShellExecute = true, Verb = "runas" }))
+                {
+                    install.WaitForExit();
+                    string message = InstallationResultMessage(install.ExitCode);
+                    if (message != null) MessageBox.Show(message, "Excel Navigator", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return install.ExitCode;
                 }
             }
         }
         catch (OperationCanceledException) { return 0; }
         catch (Exception ex)
         {
+            var nativeError = ex as System.ComponentModel.Win32Exception;
+            if (nativeError != null && nativeError.NativeErrorCode == 1223) return 0;
             if (diagnosticFile != null) { try { File.AppendAllText(diagnosticFile, ex + "\r\n"); } catch { } }
             if ((args.Length == 2 && args[0] == "--extract-only") || (args.Length == 1 && args[0] == "--check-only")) Console.Error.WriteLine(ex.Message);
             else MessageBox.Show("安装未完成：" + ex.Message + (diagnosticFile == null ? "" : "\n\n诊断日志：" + diagnosticFile), "Excel Navigator " + Assembly.GetExecutingAssembly().GetName().Version, MessageBoxButtons.OK, MessageBoxIcon.Error);
@@ -88,13 +100,22 @@ internal static class SetupLauncher
     {
         WaitForOfficeClosed(IsOfficeRunning, () => MessageBox.Show(
             "请先保存所有工作，再关闭全部 Excel 和 WPS 表格窗口。\n\n关闭后点击“重试”继续安装；点击“取消”退出安装。",
-            "保存工作并关闭 Excel / WPS", MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning));
+            "Excel Navigator", MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning));
     }
 
     internal static void WaitForOfficeClosed(Func<bool> isRunning, Func<DialogResult> prompt)
     {
         while (isRunning())
             if (prompt() != DialogResult.Retry) throw new OperationCanceledException();
+    }
+
+    internal static string InstallationResultMessage(int exitCode)
+    {
+        if (exitCode == 1602) return null;
+        if (exitCode == 0) return "Excel Navigator 安装成功。\n\n现在可以重新打开 Excel 使用导航栏。";
+        if (exitCode == 3010 || exitCode == 1641)
+            return "Excel Navigator 安装成功。\n\nWindows 提示需要重启，请保存其他工作，重启电脑后再打开 Excel。";
+        throw new InvalidOperationException("安装失败，Windows Installer 返回代码：" + exitCode + "。");
     }
 
     private static bool IsOfficeRunning()

@@ -1,6 +1,6 @@
 ﻿param(
     [Parameter(Mandatory)][string]$Directory,
-    [string]$Version = '1.0.10.0',
+    [string]$Version = '1.0.11.0',
     [ValidateSet('oneview','github')][string]$UpdateChannel = 'oneview',
     [string]$Wix,
     [string]$Csc = 'F:\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\Roslyn\csc.exe'

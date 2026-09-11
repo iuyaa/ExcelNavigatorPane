@@ -10,7 +10,7 @@
    开发机遇到 bin/Debug 或 bin/Release 注册时，可在安装器中确认备份并移除；不删除项目文件。其他冲突仍需维护人员处理。
 3. 双击 ExcelNavigator-Setup-{VERSION}.exe，安装器按 Windows 位数选择内置 MSI；64 位 Windows 同时支持 32/64 位 Excel/WPS。
 4. 安装需要管理员授权；缺少 .NET Framework 4.8 或 VSTO Runtime 时由微软引导程序联网下载。
-5. 重新打开 Excel，在“文件 → 选项 → 加载项 → COM 加载项”中查看 Excel Navigator。
+5. 看到“安装成功”提示后重新打开 Excel，在“文件 → 选项 → 加载项 → COM 加载项”中查看 Excel Navigator。若提示需要重启，请保存其他工作并重启电脑。
 
 安装到 Program Files，使用本地 VSTO 加载，不再从网址安装 ClickOnce。
 无需手工导入内部根证书。Windows 仍可能提示未知发布者；公司策略限制时请联系 IT。
