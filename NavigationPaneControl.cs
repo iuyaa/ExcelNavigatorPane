@@ -694,20 +694,29 @@ namespace ExcelNavigatorPane
         private async void DownloadUpdate(UpdateChecker.UpdateInfo release, ToolStripMenuItem button)
         {
             if (!IsReadyForCommands()) return;
-            string path;
-            using (var dialog = new SaveFileDialog { Filter = "安装程序 (*.exe)|*.exe", OverwritePrompt = true,
-                FileName = "ExcelNavigator-Setup-" + release.Version + ".exe" })
-            {
-                if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                path = dialog.FileName;
-            }
             button.Enabled = false;
             button.Text = "正在下载安装包…";
             string message;
+            bool installerStarted = false;
             try
             {
+                string directory = Path.Combine(Path.GetTempPath(), "ExcelNavigatorPane", "Updates");
+                Directory.CreateDirectory(directory);
+                string path = Path.Combine(directory, "ExcelNavigator-Setup-" + release.Version + ".exe");
                 await UpdateChecker.DownloadAsync(release, path).ConfigureAwait(false);
-                message = "安装包已下载并校验：\n" + path + "\n请保存工作并关闭 Excel 和 WPS 表格，再运行此文件升级。";
+                UpdateChecker.VerifyInstaller(path, release.Sha256);
+                try
+                {
+                    using (var installer = Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }))
+                        if (installer == null) throw new InvalidOperationException("安装程序未启动。");
+                    installerStarted = true;
+                    message = "安装程序已打开。请先保存工作，再关闭 Excel 和 WPS 表格，按安装窗口提示继续。";
+                }
+                catch (Exception ex)
+                {
+                    LogDebug("打开安装程序失败。", ex);
+                    message = "安装程序未能自动打开：\n" + path + "\n请稍后重试检查更新，或手动运行此文件。";
+                }
             }
             catch (Exception ex) { LogDebug("下载安装包失败。", ex); message = "下载未完成，原有文件保持不变，请稍后重试。"; }
             if (IsDisposed) return;
@@ -716,8 +725,11 @@ namespace ExcelNavigatorPane
                 button.Enabled = true;
                 button.ToolTipText = message;
                 button.Text = "检查更新";
-                if (IsReadyForCommands()) ShowInformation(message);
-                else button.Text = "下载结果（悬停查看）";
+                if (!installerStarted)
+                {
+                    if (IsReadyForCommands()) ShowInformation(message);
+                    else button.Text = "下载结果（悬停查看）";
+                }
             }, null);
         }
 

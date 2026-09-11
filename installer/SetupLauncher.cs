@@ -74,6 +74,7 @@ internal static class SetupLauncher
                 }
             }
         }
+        catch (OperationCanceledException) { return 0; }
         catch (Exception ex)
         {
             if (diagnosticFile != null) { try { File.AppendAllText(diagnosticFile, ex + "\r\n"); } catch { } }
@@ -85,6 +86,19 @@ internal static class SetupLauncher
 
     internal static void EnsureOfficeClosed()
     {
+        WaitForOfficeClosed(IsOfficeRunning, () => MessageBox.Show(
+            "请先保存所有工作，再关闭全部 Excel 和 WPS 表格窗口。\n\n关闭后点击“重试”继续安装；点击“取消”退出安装。",
+            "保存工作并关闭 Excel / WPS", MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning));
+    }
+
+    internal static void WaitForOfficeClosed(Func<bool> isRunning, Func<DialogResult> prompt)
+    {
+        while (isRunning())
+            if (prompt() != DialogResult.Retry) throw new OperationCanceledException();
+    }
+
+    private static bool IsOfficeRunning()
+    {
         bool running = false;
         foreach (string name in new[] { "EXCEL", "et" })
         {
@@ -92,7 +106,7 @@ internal static class SetupLauncher
             running |= processes.Length != 0;
             foreach (var process in processes) process.Dispose();
         }
-        if (running) throw new InvalidOperationException("请先保存工作并关闭所有 Excel 和 WPS 表格窗口，再运行安装包。安装器不会关闭这些程序。");
+        return running;
     }
 
     internal static string ReadPeArchitecture(string path)

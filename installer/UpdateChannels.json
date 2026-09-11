@@ -1,0 +1,8 @@
+{
+  "oneview": {
+    "manifestUrl": "https://oneview.jiarui.net.cn/excel-navigation/latest.xml"
+  },
+  "github": {
+    "manifestUrl": "https://github.com/iuyaa/ExcelNavigatorPane/releases.atom"
+  }
+}

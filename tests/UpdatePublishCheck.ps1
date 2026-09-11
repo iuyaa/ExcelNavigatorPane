@@ -1,6 +1,7 @@
 ﻿param(
     [Parameter(Mandatory)][string]$Directory,
-    [string]$Version = '1.0.9.0',
+    [string]$Version = '1.0.10.0',
+    [ValidateSet('oneview','github')][string]$UpdateChannel = 'oneview',
     [string]$Wix,
     [string]$Csc = 'F:\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\Roslyn\csc.exe'
 )
@@ -108,7 +109,7 @@ Require ($codes[0] -ne $codes[1]) 'Architecture packages must have different Pro
 $check = Join-Path $work 'UpdateCheck.exe'
 & $Csc /nologo /target:exe /main:UpdateCheck /r:System.Net.Http.dll /r:System.Xml.Linq.dll /r:System.Windows.Forms.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll "/out:$check" "/resource:$repo\Properties\UpdateSettings.xml,ExcelNavigatorPane.UpdateSettings.xml" (Join-Path $repo 'UpdateChecker.cs') (Join-Path $repo 'installer\SetupLauncher.cs') (Join-Path $PSScriptRoot 'UpdateCheck.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Update check compilation failed' }
-& $check $Directory (Join-Path $work 'x64\ExcelNavigatorPane.dll')
+& $check $Directory (Join-Path $work 'x64\ExcelNavigatorPane.dll') $UpdateChannel
 if ($LASTEXITCODE -ne 0) { throw 'Update checks failed' }
 $hostCheck = Join-Path $work 'WpsCompatibilityCheck.exe'
 & $Csc /nologo /target:exe /r:System.Windows.Forms.dll /r:System.Drawing.dll "/out:$hostCheck" (Join-Path $PSScriptRoot 'WpsCompatibilityCheck.cs')

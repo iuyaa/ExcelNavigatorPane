@@ -1,6 +1,8 @@
 ﻿param(
-    [string]$Version = '1.0.9.0',
-    [string]$UpdateBaseUrl = 'https://oneview.jiarui.net.cn/excel-navigation/',
+    [string]$Version = '1.0.10.0',
+    [ValidateSet('oneview','github')][string]$UpdateChannel = 'oneview',
+    [string]$ChannelsFile = (Join-Path $PSScriptRoot 'UpdateChannels.json'),
+    [string]$UpdateBaseUrl,
     [string]$OutputDirectory,
     [string]$CertificateThumbprint,
     [string]$MSBuild = 'F:\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe',
@@ -8,6 +10,7 @@
     [string]$BootstrapperPath = 'C:\Program Files (x86)\Microsoft SDKs\ClickOnce Bootstrapper'
 )
 $ErrorActionPreference = 'Stop'
+$UpdateChannel = $UpdateChannel.ToLowerInvariant()
 # MSI compares three version fields; reserve the fourth field as zero.
 if ($Version -notmatch '^\d+\.\d+\.\d+\.0$') { throw 'MSI versions must have the form major.minor.build.0.' }
 $parsed = [version]$Version
@@ -16,10 +19,18 @@ if ($parsed.Major -gt 255 -or $parsed.Minor -gt 255 -or $parsed.Build -gt 65535 
 $repo = Split-Path $PSScriptRoot -Parent
 if (!$Wix) { $Wix = Join-Path $repo 'work\tools\wix\wix.exe' }
 if (!(Test-Path $Wix)) { throw 'Install build tool: dotnet tool install wix --version 4.0.6 --tool-path work/tools/wix' }
+$channels = Get-Content -LiteralPath $ChannelsFile -Raw | ConvertFrom-Json
+$manifestUrl = $channels.$UpdateChannel.manifestUrl
+if ($UpdateBaseUrl) {
+    if ($UpdateChannel -ne 'oneview') { throw 'UpdateBaseUrl only applies to the oneview channel.' }
+    $manifestUrl = $UpdateBaseUrl.TrimEnd('/') + '/latest.xml'
+}
 $uri = $null
-if (![uri]::TryCreate($UpdateBaseUrl, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or
-    $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $UpdateBaseUrl -match '[;\r\n]') { throw 'A fixed HTTPS update directory is required.' }
-$UpdateBaseUrl = $uri.AbsoluteUri.TrimEnd('/') + '/'
+if (![uri]::TryCreate($manifestUrl, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or
+    $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $manifestUrl -match '[;\r\n]') { throw 'A fixed HTTPS update address is required.' }
+if ($UpdateChannel -eq 'github') {
+    if ($uri.Host -ne 'github.com' -or $uri.AbsolutePath -notmatch '^/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases\.atom$') { throw 'A GitHub releases feed address is required.' }
+} elseif (!$uri.AbsolutePath.EndsWith('/latest.xml')) { throw 'A latest.xml address is required.' }
 $certificate = if ($CertificateThumbprint) { Get-Item "Cert:\CurrentUser\My\$CertificateThumbprint" } else {
     $candidates = @(Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Where-Object {
         $_.Subject -eq 'CN=Excel Navigator Internal Test' -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date)
@@ -31,11 +42,11 @@ if (!$certificate -or !$certificate.HasPrivateKey -or $certificate.NotAfter -le 
 $rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
 $stage = Join-Path $repo ('work\installer\msi-' + [guid]::NewGuid().ToString('N'))
 $app = Join-Path $stage 'app'; $payload = Join-Path $stage 'payload'
-$dist = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $repo "dist\releases\$Version" }
+$dist = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $repo "dist\releases\$Version\$UpdateChannel" }
 New-Item -ItemType Directory -Path $app,$payload,$dist -Force | Out-Null
 $settingsFile = Join-Path $stage 'UpdateSettings.xml'
 $settings = [xml]::new(); $node = $settings.CreateElement('updates')
-$node.SetAttribute('version', $Version); $node.SetAttribute('manifestUrl', $UpdateBaseUrl + 'latest.xml')
+$node.SetAttribute('version', $Version); $node.SetAttribute('channel', $UpdateChannel); $node.SetAttribute('manifestUrl', $uri.AbsoluteUri)
 $key = $settings.CreateElement('publicKey'); $key.InnerText = $rsa.ToXmlString($false)
 [void]$node.AppendChild($key); [void]$settings.AppendChild($node); $settings.Save($settingsFile)
 function Read-AddinRegistration {
@@ -106,7 +117,7 @@ $signed = $rsa.SignData([Text.Encoding]::UTF8.GetBytes($message), [Security.Cryp
 $entry.SetAttribute('signature',[Convert]::ToBase64String($signed)); [void]$release.AppendChild($entry)
 $release.Save((Join-Path $dist 'latest.xml'))
 $rsa.ToXmlString($false) | Set-Content (Join-Path $dist 'update-public-key.xml') -Encoding utf8
-(Get-Content (Join-Path $PSScriptRoot '安装说明.txt') -Raw).Replace('{VERSION}',$Version) | Set-Content (Join-Path $dist '安装说明.txt') -Encoding utf8
+(Get-Content (Join-Path $PSScriptRoot '安装说明.txt') -Raw).Replace('{VERSION}',$Version).Replace('{CHANNEL}',$UpdateChannel) | Set-Content (Join-Path $dist '安装说明.txt') -Encoding utf8
 $check = Join-Path $stage 'extraction-check'
 $process = Start-Process $exe -ArgumentList @('--extract-only', ('"' + $check + '"')) -WindowStyle Hidden -PassThru -Wait
 if ($process.ExitCode -ne 0) { throw 'EXE extraction check failed.' }

@@ -111,12 +111,13 @@ msbuild .\ExcelNavigatorPane.csproj /t:Rebuild /p:Configuration=Debug /p:Platfor
 
 ### EXE 安装包（内含 MSI）
 
-以下命令生成 `dist/releases/1.0.9.0/ExcelNavigator-Setup-1.0.9.0.exe`。用户只需一个 EXE，无需 Visual Studio。EXE 检查桌面 Excel 已安装后，按 Windows 位数选择内置 MSI；64 位包同时注册 32/64 位宿主，共享 AnyCPU 插件；缺少 .NET Framework 4.8 或 VSTO Runtime 时由微软引导程序下载依赖。
+以下命令生成 `dist/releases/1.0.10.0/渠道/ExcelNavigator-Setup-1.0.10.0.exe`。用户只需一个 EXE，无需 Visual Studio。EXE 检查桌面 Excel 已安装后，按 Windows 位数选择内置 MSI；64 位包同时注册 32/64 位宿主，共享 AnyCPU 插件；缺少 .NET Framework 4.8 或 VSTO Runtime 时由微软引导程序下载依赖。
 
 ```powershell
 # 一次性准备 WiX 构建工具；用户电脑不需要 WiX
 dotnet tool install wix --version 4.0.6 --tool-path work/tools/wix
-./installer/Build-Installer.ps1 -Version 1.0.9.0
+./installer/Build-Installer.ps1 -Version 1.0.10.0 -UpdateChannel oneview
+./installer/Build-Installer.ps1 -Version 1.0.10.0 -UpdateChannel github
 ```
 
 安装前保存工作并关闭所有 Excel 与 WPS 表格。MSI 需要管理员授权，将加载项安装到对应的 Program Files 目录，并写入 HKLM 加载项注册（64 位 Windows 同时写入 32/64 位视图），使用 `|vstolocal` 从本地加载。正常 Windows/VSTO 策略下，这条安装方式使用 Program Files 的信任机制，不需要用户导入自签名根证书。EXE 仍可能显示未知发布者或 Windows 安全提示，公司策略也可能限制安装。
@@ -131,15 +132,16 @@ MSI 版后续升级直接运行新版 EXE，Windows Installer 负责替换旧版
 
 - 工作簿菜单“检查更新”读取固定 HTTPS `latest.xml`，最多等待 10 秒；“关于导航栏”显示安装版本。
 - 清单包含版本、相对 EXE 路径、SHA-256 和 RSA-SHA256 签名。插件使用内置公钥验证签名，拒绝篡改、外站路径、非 HTTPS、重定向和错误产品。
-- 发现新版后询问是否下载，让用户选择保存位置；下载最长 2 分钟、最多 128 MiB。文件哈希通过后才替换目标文件，失败会清理临时文件并保留原文件。
-- 下载完成后由用户保存工作、关闭 Excel 与 WPS 表格、运行 EXE 升级。插件不自动执行安装包、不强制退出或重启 Excel；不在启动时自动检查。
+- 发现新版后询问是否下载，确认后自动保存到系统临时目录下的 `ExcelNavigatorPane\Updates`（通过 `Path.GetTempPath()` 获取，通常为 `%TEMP%\ExcelNavigatorPane\Updates`），不再弹出另存为窗口；下载最长 2 分钟、最多 128 MiB。文件哈希通过后才替换同版本目标文件，失败会清理临时文件并保留原文件。
+- 用户确认下载后，安装包校验通过便自动打开。安装器检测到 Excel 或 WPS 表格运行时，提示先保存工作、关闭所有窗口，再点击“重试”继续；点击“取消”退出安装。自动打开失败时提示文件路径供手动运行，不强制退出或重启 Excel/WPS；不在启动时自动检查。
 - 开发构建未配置更新地址时不发起网络请求。正式打包默认使用 `https://oneview.jiarui.net.cn/excel-navigation/`，可用 `-UpdateBaseUrl` 指定其他固定 HTTPS 目录。
 - 旧 ClickOnce 根入口和旧文件继续保留；本版不会通过旧 `.vsto` 入口迁移用户，需要首次手工安装 MSI 版。
 
 本地检查：
 
 ```powershell
-./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.9.0 -Version 1.0.9.0
+./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.10.0/oneview -Version 1.0.10.0 -UpdateChannel oneview
+./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.10.0/github -Version 1.0.10.0 -UpdateChannel github
 python tests/RustFSPublishCheck.py
 ```
 
@@ -147,20 +149,26 @@ python tests/RustFSPublishCheck.py
 
 ### 发布流程
 
-1.0.9.0 为内部预发布版本，完整真实升级验收尚未完成，普通修改不自动发布。用户要求“发布”时完成以下全部步骤，更新日志维护在 [CHANGELOG.md](CHANGELOG.md)：
+更新渠道由 [installer/UpdateChannels.json](installer/UpdateChannels.json) 配置，通过构建参数 `-UpdateChannel oneview|github` 选择，默认 `oneview`；可用 `-ChannelsFile` 指定其他配置文件。地址不会写死在 C# 中，也不需要给客户端任何 GitHub Token 或 S3 凭据。
 
-1. 确定递增版本号并整理更新日志，同步 `Properties/UpdateSettings.xml` 和 `Properties/AssemblyInfo.cs` 的 `AssemblyFileVersion`，避免 MSI 因 DLL 文件版本未增长而跳过替换。采用 `主.次.构建.0`，最后一段必须为 0；MSI 只比较前三段（最大分别为 255、255、65535）。下一版例如 1.0.10.0。
+- `oneview`：读取配置中的 HTTPS `latest.xml`，从对象存储下载；保留旧版兼容。
+- `github`：读取公开仓库 `releases.atom`，选择其中最高版本（包含预发布），再下载对应标签的 `latest.xml` 和 EXE；仅允许 GitHub 和其 Release 资源域名的 HTTPS 重定向。私有仓库不能用于匿名客户端更新。
+- 安装包保留构建时选定的渠道。1.0.9 及更早的包均继续走 OneView，即便最初是从 GitHub 下载的；要转为 GitHub 渠道，安装一次 GitHub 渠道的新版本。不要用同版本安装包切换渠道，MSI 可能拒绝同版本替换。
+
+1.0.10.0 为内部预发布版本，完整真实升级验收尚未完成，普通修改不自动发布。用户要求“发布”时完成以下全部步骤，更新日志维护在 [CHANGELOG.md](CHANGELOG.md)：
+
+1. 确定递增版本号并整理更新日志，同步 `Properties/UpdateSettings.xml` 和 `Properties/AssemblyInfo.cs` 的 `AssemblyFileVersion`，避免 MSI 因 DLL 文件版本未增长而跳过替换。采用 `主.次.构建.0`，最后一段必须为 0；MSI 只比较前三段（最大分别为 255、255、65535）。下一版例如 1.0.11.0。
 2. 完成相关检查，提交源码与日志并推送 GitHub；排除凭据、私钥、生成物和无关本地修改。
-3. 从该提交构建安装包，显式指定版本、正式更新目录及沿用的发布证书。运行上述检查，创建并推送指向同一提交的 `v版本号` 标签。
-4. 创建 GitHub Release 草稿，附上 EXE、SHA-256、x86/x64 MSI、安装说明、`latest.xml` 和 `update-public-key.xml`。用户默认下载 EXE；MSI 供具备运行环境的 IT 部署使用，必须选择 Windows 对应位数，先关闭 Excel、卸载旧 ClickOnce。
-5. 复用同一批产物上传 RustFS：先上传并校验 `releases/版本号/` 内的七个文件，最后更新根 `latest.xml`。保留全部旧版本和旧 ClickOnce 对象，不进行删除同步；同版本内容不同会拒绝覆盖。发布端需要 boto3、python-dotenv、requests、cryptography。
-6. 验证用户 HTTPS 地址匿名下载、清单签名、版本和文件完整性，再发布 Release。未完成独立电脑安装和升级验收时使用预发布。报告提交、标签、Release 链接、下载地址和验证结果；失败说明已完成与待补步骤。
+3. 从该提交分别用 `-UpdateChannel oneview`、`-UpdateChannel github` 构建，沿用同一发布证书。两个渠道版本号及源码相同，但嵌入的渠道配置不同，EXE 哈希及签名清单也不同，不得混用。对各自产物运行 `tests/UpdatePublishCheck.ps1 -Directory dist/releases/版本号/渠道 -Version 版本号 -UpdateChannel 渠道`，创建并推送指向同一提交的 `v版本号` 标签。
+4. 创建 GitHub Release 草稿，上传 **github 目录**内的 EXE、SHA-256、x86/x64 MSI、安装说明、`latest.xml` 和 `update-public-key.xml`。用户默认下载 EXE；MSI 供具备运行环境的 IT 部署使用，必须选择 Windows 对应位数，先关闭 Excel、卸载旧 ClickOnce。
+5. 将 **oneview 目录**的产物上传 RustFS：先上传并校验 `releases/版本号/` 内的七个文件，最后更新根 `latest.xml`。保留全部旧版本和旧 ClickOnce 对象，不进行删除同步；同版本内容不同会拒绝覆盖。发布端需要 boto3、python-dotenv、requests、cryptography。
+6. 验证 RustFS 匿名下载及 GitHub 草稿附件哈希后发布 Release，再验证公开 GitHub 订阅源、签名清单、EXE 下载；两条渠道均须完成实网更新检查和下载哈希验证。未完成独立电脑安装和升级验收时使用预发布。报告提交、标签、Release 链接、下载地址和验证结果；失败说明已完成与待补步骤。
 
 ```powershell
 # 默认只检查本地产物并预览，不访问 RustFS
-python installer/Publish-RustFS.py --version 1.0.9.0 --directory dist/releases/1.0.9.0
+python installer/Publish-RustFS.py --version 1.0.10.0 --directory dist/releases/1.0.10.0/oneview
 # 用户要求发布时执行，逐文件上传并校验匿名下载，入口最后更新
-python installer/Publish-RustFS.py --version 1.0.9.0 --directory dist/releases/1.0.9.0 --apply
+python installer/Publish-RustFS.py --version 1.0.10.0 --directory dist/releases/1.0.10.0/oneview --apply
 ```
 
 正式更新目录为 `https://oneview.jiarui.net.cn/excel-navigation/`，S3 Endpoint 为同域名根地址，凭据保存在 Git 忽略的本机 `.env`。路由和上传账号已在 1.0.0.2 发布时验证；迁移不改变桶、账号或域名，新的入口在本版正式发布时上传。详情见 [RustFS 接入说明](installer/RustFS接入说明.md)。

@@ -5,6 +5,8 @@ using System.IO;
 using System.Reflection;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.Http;
+using System.Threading;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
@@ -13,6 +15,48 @@ using ExcelNavigatorPane;
 
 class UpdateCheck
 {
+    class RedirectHandler : HttpMessageHandler
+    {
+        internal string Location;
+        internal int Calls;
+        internal bool Repeat;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            var response = new HttpResponseMessage(++Calls == 1 || Repeat ? HttpStatusCode.Redirect : HttpStatusCode.OK);
+            if (response.StatusCode == HttpStatusCode.Redirect) response.Headers.Location = new Uri(Location);
+            return Task.FromResult(response);
+        }
+    }
+
+    static void CheckChannels()
+    {
+        var address = UpdateChecker.ParseAddress("https://github.com/example/releases-test/releases.atom", "github");
+        string feed = "<feed xmlns='http://www.w3.org/2005/Atom'>" +
+            "<entry><link rel='alternate' href='https://github.com/example/releases-test/releases/tag/v1.0.9.0'/></entry>" +
+            "<entry><link rel='alternate' href='https://github.com/example/releases-test/releases/tag/v1.0.10.0'/></entry>" +
+            "<entry><link rel='alternate' href='https://evil.invalid/releases/tag/v99.0.0.0'/></entry></feed>";
+        Require(UpdateChecker.GitHubManifest(feed, address).AbsoluteUri ==
+            "https://github.com/example/releases-test/releases/download/v1.0.10.0/latest.xml");
+        Reject(() => UpdateChecker.GitHubManifest("<feed xmlns='http://www.w3.org/2005/Atom'/>", address));
+        Reject(() => UpdateChecker.GitHubManifest("<!DOCTYPE feed [<!ENTITY x SYSTEM 'file:///secret'>]><feed>&x;</feed>", address));
+        Reject(() => UpdateChecker.ParseAddress(address.AbsoluteUri));
+        Reject(() => UpdateChecker.ParseAddress("https://evil.invalid/example/repo/releases.atom", "github"));
+        Reject(() => UpdateChecker.ParseAddress("", "unknown"));
+        foreach (var target in new[] { "https://evil.invalid/file", "http://github.com/file", "https://user@github.com/file" })
+            Require(!UpdateChecker.IsGitHubDownloadAddress(new Uri(target)));
+        foreach (bool github in new[] { false, true })
+        {
+            var handler = new RedirectHandler { Location = "https://release-assets.githubusercontent.com/asset?signature=test" };
+            using (var client = new HttpClient(handler))
+            {
+                Action request = () => { using (var response = UpdateChecker.GetResponseAsync(client, address, github).GetAwaiter().GetResult()) Require(response.IsSuccessStatusCode); };
+                if (github) { request(); Require(handler.Calls == 2); } else Reject(request);
+            }
+        }
+        foreach (var target in new[] { "https://evil.invalid/file", "https://github.com/loop" })
+            using (var client = new HttpClient(new RedirectHandler { Location = target, Repeat = true }))
+                Reject(() => UpdateChecker.GetResponseAsync(client, address, true).GetAwaiter().GetResult());
+    }
     static void Require(bool value) { if (!value) throw new Exception("Check failed"); }
     static void Reject(Action action)
     {
@@ -57,6 +101,17 @@ class UpdateCheck
     {
         try
         {
+            int officeChecks = 0, prompts = 0;
+            CheckChannels();
+            SetupLauncher.WaitForOfficeClosed(() => ++officeChecks <= 2,
+                () => { prompts++; return System.Windows.Forms.DialogResult.Retry; });
+            Require(officeChecks == 3 && prompts == 2);
+            SetupLauncher.WaitForOfficeClosed(() => false,
+                () => { throw new Exception("Closed Office must not prompt"); });
+            bool cancelled = false;
+            try { SetupLauncher.WaitForOfficeClosed(() => true, () => System.Windows.Forms.DialogResult.Cancel); }
+            catch (OperationCanceledException) { cancelled = true; }
+            Require(cancelled);
             const string installedManifest = "file:///C:/Program Files/ExcelNavigatorPane/ExcelNavigatorPane.vsto|vstolocal";
             Require(!SetupLauncher.HasConflictingRegistration(null, installedManifest));
             Require(!SetupLauncher.HasConflictingRegistration("", installedManifest));
@@ -102,7 +157,9 @@ class UpdateCheck
                 var settings = XElement.Load(stream);
                 Require((string)settings.Element("publicKey") == key);
                 Require((string)settings.Attribute("version") == release.Version.ToString());
-                Require(UpdateChecker.ParseAddress((string)settings.Attribute("manifestUrl")) != null);
+                string channel = args.Length > 2 ? args[2] : "oneview";
+                Require(((string)settings.Attribute("channel") ?? "oneview") == channel);
+                Require(UpdateChecker.ParseAddress((string)settings.Attribute("manifestUrl"), channel) != null);
             }
             string temp = Path.GetTempFileName();
             try
@@ -124,7 +181,7 @@ class UpdateCheck
                 CheckDownload(temp,false); CheckDownload(temp,true);
             }
             finally { File.Delete(temp); }
-            Console.WriteLine("PASS: signed release, pinned package key/version, newer version, tamper/wrong key/DTD/URL/hash rejection, disabled updates, Excel PE architecture, download/replace/cleanup (loopback only)");
+            Console.WriteLine("PASS: channel/feed/redirect boundaries, Office wait/retry/cancel, signed release, pinned package key/version, newer version, tamper/wrong key/DTD/URL/hash rejection, disabled updates, Excel PE architecture, download/replace/cleanup (loopback only)");
             return 0;
         }
         catch (Exception ex) { Console.WriteLine(ex); return 1; }
