@@ -21,6 +21,12 @@ class NavigationIconCheck
         var type = Assembly.LoadFrom(args[0]).GetType("ExcelNavigatorPane.NavigationPaneControl");
         const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Instance;
         var draw = type.GetMethod("DrawNavigationIcon", BindingFlags.NonPublic | BindingFlags.Static);
+        var decode = type.GetMethod("DecodeTabColor", BindingFlags.NonPublic | BindingFlags.Static);
+        if (decode.Invoke(null, new object[] { -4142, 0 }) != null ||
+            decode.Invoke(null, new object[] { 1, false }) != null ||
+            ((Color)decode.Invoke(null, new object[] { 1, 0 })).ToArgb() != Color.Black.ToArgb() ||
+            ((Color)decode.Invoke(null, new object[] { 3, 255d })).ToArgb() != Color.Red.ToArgb())
+            throw new Exception("Tab color conversion confused no color, black or OLE BGR.");
         string[] names = { "book", "sheet", "add", "search", "refresh", "switch", "eye", "eye-off", "lock", "unlock", "close", "more" };
         using (var atlas = new Bitmap(names.Length * 80, 180))
         using (var g = Graphics.FromImage(atlas))
@@ -72,15 +78,21 @@ class NavigationIconCheck
                         var visibility = itemType.GetProperty("Visibility");
                         visibility.SetValue(item, Enum.ToObject(visibility.PropertyType, i == 2 ? 0 : -1), null);
                         itemType.GetProperty("IsProtected").SetValue(item, i == 3, null);
+                        itemType.GetProperty("TabColor").SetValue(item, i == 0 ? (Color?)Color.Red : i == 1 ? Color.White : i == 2 ? Color.Blue : (Color?)null, null);
                     }
                     list.Items.Add(item);
                 }
             }
             type.GetField("_hoveredWsIndex", flags).SetValue(pane, 1);
             type.GetField("_mouseLocWs", flags).SetValue(pane, new Point(sheets.ClientSize.Width - 40, 45));
+            var search = (ToolStripTextBox)type.GetField("_txtFilter", flags).GetValue(pane);
+            var clear = (ToolStripButton)type.GetField("_btnClearFilter", flags).GetValue(pane);
+            search.Text = "工作表";
             type.GetMethod("UpdateWorkbookLayout", flags).Invoke(pane, null);
             form.Show();
             form.PerformLayout();
+            if (!clear.Available || search.Bounds.Right > clear.Bounds.Left || clear.Bounds.Right > clear.GetCurrentParent().ClientSize.Width)
+                throw new Exception("Search text overlaps or clips clear action at width " + width);
             if (books.Parent.Bottom >= sheets.Parent.Bottom || sheets.Height < 90)
                 throw new Exception("Invalid pane layout");
             using (var preview = new Bitmap(width, 600))
@@ -96,8 +108,19 @@ class NavigationIconCheck
                     {
                         rowGraphics.Clear(Color.White);
                         for (int i = 0; i < list.Items.Count; i++)
+                        {
                             type.GetMethod(list == books ? "LbWorkbooks_DrawItem" : "LbWorksheets_DrawItem", flags).Invoke(pane,
                                 new object[] { list, new DrawItemEventArgs(rowGraphics, pane.Font, list.GetItemRectangle(i), i, DrawItemState.None) });
+                            if (list == sheets && i < 3)
+                            {
+                                var bounds = list.GetItemRectangle(i);
+                                var expected = i == 0 ? Color.Red : i == 1 ? Color.White : Color.Blue;
+                                if (rows.GetPixel(bounds.Left + 28, bounds.Top + bounds.Height / 2).ToArgb() != expected.ToArgb())
+                                    throw new Exception("Tab color lost in active/hover/hidden row.");
+                                if (i == 0 && rows.GetPixel(bounds.Left, bounds.Top + bounds.Height / 2).ToArgb() == Color.Red.ToArgb())
+                                    throw new Exception("Tab color replaced active indicator.");
+                            }
+                        }
                         g.DrawImageUnscaled(rows, origin);
                     }
                 }

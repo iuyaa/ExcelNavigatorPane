@@ -22,6 +22,18 @@ class WorksheetListFilterCheck
             using (var pane = (Control)Activator.CreateInstance(type))
             {
                 var button = (ToolStripButton)type.GetField("_btnListHiddenSheets", flags).GetValue(pane);
+                var search = (ToolStripTextBox)type.GetField("_txtFilter", flags).GetValue(pane);
+                var clear = (ToolStripButton)type.GetField("_btnClearFilter", flags).GetValue(pane);
+                Require(!clear.Available, "Empty search must hide clear action");
+                foreach (bool showHidden in new[] { false, true })
+                {
+                    button.Checked = showHidden;
+                    search.Text = "预算";
+                    Require(clear.Available && clear.AccessibleName == "清除搜索", "Search needs accessible clear action");
+                    clear.PerformClick();
+                    Require(search.Text == "" && !clear.Available && button.Checked == showHidden,
+                        "Clear must reset text and preserve visibility filter");
+                }
                 var matches = type.GetMethod("ShouldListWorksheet", flags);
                 var visibilityType = matches.GetParameters()[1].ParameterType;
                 Func<string, int, string, bool> includes = (name, visibility, search) =>

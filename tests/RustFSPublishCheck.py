@@ -1,15 +1,19 @@
-"""Offline promotion-order and immutable-version regression check; no network."""
+"""Offline release promotion checks; all S3/HTTP calls are mocked."""
+import base64
 import hashlib
 import importlib.util
+import io
 import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import unquote
-from zipfile import ZipFile
+import xml.etree.ElementTree as ET
 
 from botocore.exceptions import ClientError
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 spec = importlib.util.spec_from_file_location('publisher', Path(__file__).resolve().parents[1] / 'installer/Publish-RustFS.py')
 publisher = importlib.util.module_from_spec(spec)
@@ -18,12 +22,12 @@ spec.loader.exec_module(publisher)
 
 def main():
     base = 'https://updates.example.invalid/excel-navigation/'
-    remote, writes = {}, []
+    remote, writes = {'ExcelNavigatorPane.vsto': b'keep legacy entry'}, []
+    bad_download, concurrent_publish = False, False
 
     def get_object(Bucket, Key):
-        import io
         if Key not in remote:
-            raise ClientError({'Error': {'Code': 'NoSuchKey'}, 'ResponseMetadata': {'HTTPStatusCode': 404}}, 'GetObject')
+            raise ClientError({'Error': {'Code': 'NoSuchKey'}}, 'GetObject')
         return {'Body': io.BytesIO(remote[Key])}
 
     def put_object(**args):
@@ -32,43 +36,83 @@ def main():
 
     def download(url, **kwargs):
         key = unquote(url.removeprefix(base))
-        return SimpleNamespace(status_code=200, content=remote[key], headers={'Content-Type': 'application/x-ms-vsto'})
+        if concurrent_publish:
+            remote['latest.xml'] = newer
+        return SimpleNamespace(status_code=200, content=b'corrupted' if bad_download else remote[key])
+
+    def reject():
+        try:
+            publisher.main()
+        except ValueError:
+            return
+        raise AssertionError('Unsafe publication accepted')
 
     settings = {'TYAPP_S3_ENDPOINT': base.split('/excel-navigation/')[0], 'TYAPP_S3_BUCKET': 'excel-navigation',
                 'TYAPP_S3_FORCE_PATH_STYLE': 'true', 'TYAPP_S3_REGION': 'us-east-1',
                 'TYAPP_S3_ACCESS_KEY_ID': 'fixture', 'TYAPP_S3_SECRET_ACCESS_KEY': 'fixture'}
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    numbers = key.public_key().public_numbers()
+    b64int = lambda x: base64.b64encode(x.to_bytes((x.bit_length() + 7) // 8, 'big')).decode()
+    public = f'<RSAKeyValue><Modulus>{b64int(numbers.n)}</Modulus><Exponent>{b64int(numbers.e)}</Exponent></RSAKeyValue>'
+    name = 'ExcelNavigator-Setup-1.0.1.0.exe'
+    installer = b'fixture installer'
+    digest = hashlib.sha256(installer).hexdigest()
+    root = ET.Element('release', product='ExcelNavigatorPane', version='1.0.1.0',
+                      file='releases/1.0.1.0/' + name, sha256=digest)
+    message = '\n'.join(root.attrib[n] for n in ('product', 'version', 'file', 'sha256'))
+    root.set('signature', base64.b64encode(key.sign(message.encode(), padding.PKCS1v15(), hashes.SHA256())).decode())
+    manifest = ET.tostring(root)
+    newer = manifest.replace(b'1.0.1.0', b'1.0.2.0')
+    publisher.verify_release(manifest, public)
     with tempfile.TemporaryDirectory() as temp:
         path = Path(temp)
-        name = 'ExcelNavigator-Setup-1.0.0.2.exe'
-        (path / name).write_bytes(b'fixture installer')
-        (path / (name + '.sha256')).write_text(hashlib.sha256(b'fixture installer').hexdigest() + '  ' + name)
-        (path / '安装说明.txt').write_text('fixture', encoding='utf-8')
-        with ZipFile(path / 'ExcelNavigator-Publish-1.0.0.2.zip', 'w') as zipped:
-            zipped.writestr('ExcelNavigatorPane.vsto', '<assembly xmlns="urn:schemas-microsoft-com:asm.v1"><assemblyIdentity name="ExcelNavigatorPane.vsto" version="1.0.0.2" /></assembly>')
-            zipped.writestr('Application Files/1_0_0_2/fixture.dll', b'fixture dll')
-            zipped.writestr('setup.exe', base.encode('utf-16le'))
-        argv = ['Publish-RustFS.py', '--version', '1.0.0.2', '--directory', temp, '--apply']
+        for filename, data in {name: installer, name + '.sha256': (digest + '  ' + name).encode(),
+                               'latest.xml': manifest, 'update-public-key.xml': public.encode(),
+                               '安装说明.txt': b'fixture', 'ExcelNavigator-1.0.1.0-x86.msi': b'x86',
+                               'ExcelNavigator-1.0.1.0-x64.msi': b'x64'}.items():
+            (path / filename).write_bytes(data)
+        argv = ['Publish-RustFS.py', '--version', '1.0.1.0', '--directory', temp, '--apply']
         with patch.object(sys, 'argv', argv), patch.object(publisher, 'dotenv_values', return_value=settings), \
              patch.object(publisher.boto3, 'client', return_value=SimpleNamespace(get_object=get_object, put_object=put_object)), \
              patch.object(publisher.requests, 'Session', return_value=SimpleNamespace(get=download)):
             publisher.main()
-            assert writes[-1] == 'ExcelNavigatorPane.vsto' and writes.index('setup.exe') > writes.index('Application Files/1_0_0_2/fixture.dll')
+            assert len(writes) == 8 and writes[-1] == 'latest.xml'
+            assert remote['ExcelNavigatorPane.vsto'] == b'keep legacy entry'
+            baseline = remote.copy()
             writes.clear()
             publisher.main()
-            assert all(not key.startswith(('Application Files/', 'releases/')) for key in writes)
-            for key, replacement in [('Application Files/1_0_0_2/fixture.dll', b'conflict'),
-                                     ('ExcelNavigatorPane.vsto', remote['ExcelNavigatorPane.vsto'].replace(b'1.0.0.2', b'1.0.0.3'))]:
-                original = remote[key]
-                remote[key] = replacement
+            assert writes == ['latest.xml']
+            for object_key, replacement in [('releases/1.0.1.0/' + name, b'conflict'), ('latest.xml', newer),
+                                             ('latest.xml', manifest.replace(digest.encode(), b'0' * 64))]:
+                remote[object_key] = replacement
                 writes.clear()
-                try:
-                    publisher.main()
-                except ValueError:
-                    assert not writes
-                else:
-                    raise AssertionError('Conflict or downgrade accepted')
-                remote[key] = original
-    print('PASS: promotion order, exact retry, immutable conflict and downgrade rejection; no network')
+                reject()
+                assert not writes
+                remote.clear()
+                remote.update(baseline)
+            writes.clear()
+            bad_download = True
+            reject()
+            assert 'latest.xml' not in writes
+            bad_download = False
+            concurrent_publish = True
+            writes.clear()
+            reject()
+            assert 'latest.xml' not in writes and remote['latest.xml'] == newer
+            concurrent_publish = False
+            remote.clear()
+            remote.update(baseline)
+            (path / name).write_bytes(b'tampered installer')
+            writes.clear()
+            reject()
+            assert not writes
+            try:
+                publisher.verify_release(newer, public)
+            except Exception as error:
+                assert type(error).__name__ == 'InvalidSignature'
+            else:
+                raise AssertionError('Tampered signature accepted')
+    print('PASS: signed metadata, promote last, preserve legacy, retry, conflict/downgrade/hash rejection, download failure and concurrent publication; no network')
 
 
 if __name__ == '__main__':

@@ -1,0 +1,56 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Excel Navigator" Manufacturer="Excel Navigator" Version="$(var.MsiVersion)"
+           UpgradeCode="A14219F5-2541-441C-BAEC-606015D32B55" Scope="perMachine" Language="2052" Codepage="65001">
+    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的 Excel Navigator。" Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="REBOOT" Value="ReallySuppress" />
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
+    <?if $(sys.BUILDARCH) = x86 ?>
+    <Launch Condition="Installed OR NOT VersionNT64" Message="64 位 Windows 请运行 EXE 或 x64 MSI；它同时支持 32 位和 64 位 Excel/WPS。" />
+    <?endif ?>
+    <Property Id="NET48">
+      <RegistrySearch Id="Net48Search" Root="HKLM" Key="SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full" Name="Release" Type="raw" Bitness="always32" />
+    </Property>
+    <Property Id="VSTORUNTIME">
+      <RegistrySearch Id="VstoRedistributable32" Root="HKLM" Key="SOFTWARE\Microsoft\VSTO Runtime Setup\v4R" Name="Version" Type="raw" Bitness="always32" />
+      <RegistrySearch Id="VstoOffice32" Root="HKLM" Key="SOFTWARE\Microsoft\VSTO Runtime Setup\v4" Name="Version" Type="raw" Bitness="always32" />
+      <RegistrySearch Id="VstoRedistributable64" Root="HKLM" Key="SOFTWARE\Microsoft\VSTO Runtime Setup\v4R" Name="Version" Type="raw" Bitness="always64" />
+      <RegistrySearch Id="VstoOffice64" Root="HKLM" Key="SOFTWARE\Microsoft\VSTO Runtime Setup\v4" Name="Version" Type="raw" Bitness="always64" />
+    </Property>
+    <!-- ponytail: raw DWORDs compare as strings; .NET 4.x Release values have six digits. -->
+    <Launch Condition="Installed OR (NET48 &gt;= &quot;#528040&quot;)" Message="请先安装 .NET Framework 4.8，或运行 EXE 安装包自动安装依赖。" />
+    <Launch Condition="Installed OR VSTORUNTIME" Message="请先安装 VSTO Runtime，或运行 EXE 安装包自动安装依赖。" />
+    <StandardDirectory Id="$(var.ProgramFiles)">
+      <Directory Id="INSTALLFOLDER" Name="ExcelNavigatorPane">
+        <?include $(var.PayloadInclude) ?>
+        <Component Id="AddinRegistration" Guid="*">
+          <RegistryKey Root="HKLM" Key="Software\Microsoft\Office\Excel\Addins\ExcelNavigatorPane">
+            <RegistryValue Name="Description" Value="工作簿和工作表导航" Type="string" />
+            <RegistryValue Name="FriendlyName" Value="Excel Navigator" Type="string" />
+            <RegistryValue Name="LoadBehavior" Value="3" Type="integer" />
+            <RegistryValue Name="Manifest" Value="file:///[INSTALLFOLDER]ExcelNavigatorPane.vsto|vstolocal" Type="string" KeyPath="yes" />
+          </RegistryKey>
+        </Component>
+        <?if $(sys.BUILDARCH) = x64 ?>
+        <!-- The AnyCPU payload is shared by 64-bit Excel and 32-bit WPS. -->
+        <Component Id="AddinRegistration32" Guid="*" Bitness="always32">
+          <RegistryKey Root="HKLM" Key="Software\Microsoft\Office\Excel\Addins\ExcelNavigatorPane">
+            <RegistryValue Name="Description" Value="工作簿和工作表导航" Type="string" />
+            <RegistryValue Name="FriendlyName" Value="Excel Navigator" Type="string" />
+            <RegistryValue Name="LoadBehavior" Value="3" Type="integer" />
+            <RegistryValue Name="Manifest" Value="file:///[INSTALLFOLDER]ExcelNavigatorPane.vsto|vstolocal" Type="string" KeyPath="yes" />
+          </RegistryKey>
+        </Component>
+        <?endif ?>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Main" Title="Excel Navigator" Level="1">
+      <ComponentGroupRef Id="PayloadComponents" />
+      <ComponentRef Id="AddinRegistration" />
+      <?if $(sys.BUILDARCH) = x64 ?>
+      <ComponentRef Id="AddinRegistration32" />
+      <?endif ?>
+    </Feature>
+  </Package>
+</Wix>

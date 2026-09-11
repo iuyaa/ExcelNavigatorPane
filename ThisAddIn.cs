@@ -31,20 +31,24 @@ namespace ExcelNavigatorPane
             public bool HiddenApplied { get; set; }
         }
 
-        // 每个 Excel 窗口拥有独立的 TaskPane；工作簿级临时状态由加载项共享。
+        // Excel 按文档窗口、WPS 按共享主窗口管理 TaskPane；工作簿临时状态由加载项共享。
         private readonly Dictionary<int, (CustomTaskPane Pane, NavigationPaneControl Control)> _windowPanes =
             new Dictionary<int, (CustomTaskPane, NavigationPaneControl)>();
+        private readonly HashSet<int> _creatingPaneKeys = new HashSet<int>();
 
         private readonly ConditionalWeakTable<Excel.Workbook, WorkbookHiddenState> _hiddenStates =
             new ConditionalWeakTable<Excel.Workbook, WorkbookHiddenState>();
 
         private bool _refreshQueued;
         private bool _queuedFullRefresh;
+        internal bool IsWpsHost { get; private set; }
 
         private void ThisAddIn_Startup(object sender, EventArgs e)
         {
             try
             {
+                // WPS exposes Excel-compatible COM objects, but tabs share a native frame.
+                IsWpsHost = string.Equals(Process.GetCurrentProcess().ProcessName, "et", StringComparison.OrdinalIgnoreCase);
                 this.Application.WorkbookOpen += Application_WorkbookOpen;
                 this.Application.WorkbookActivate += Application_WorkbookActivate;
                 this.Application.WorkbookBeforeClose += Application_WorkbookBeforeClose;
@@ -199,7 +203,7 @@ namespace ExcelNavigatorPane
             int hwnd;
             try
             {
-                hwnd = window.Hwnd;
+                hwnd = GetPaneKey(window);
             }
             catch (Exception ex)
             {
@@ -207,12 +211,13 @@ namespace ExcelNavigatorPane
                 return;
             }
 
+            if (_creatingPaneKeys.Contains(hwnd)) return;
             (CustomTaskPane Pane, NavigationPaneControl Control) existing;
             if (_windowPanes.TryGetValue(hwnd, out existing))
             {
                 try
                 {
-                    if (existing.Pane.Window == null) throw new InvalidOperationException("TaskPane 已与窗口分离。");
+                    if (!IsWpsHost && existing.Pane.Window == null) throw new InvalidOperationException("TaskPane 已与窗口分离。");
                     existing.Control.UpdateContext(window, workbook);
                     if (!existing.Pane.Visible) existing.Pane.Visible = true;
                     return;
@@ -224,22 +229,29 @@ namespace ExcelNavigatorPane
                 }
             }
 
+            if (!_creatingPaneKeys.Add(hwnd)) return; // Pane creation can re-enter activation events.
+            NavigationPaneControl control = null;
+            CustomTaskPane pane = null;
             try
             {
-                var control = new NavigationPaneControl();
+                control = new NavigationPaneControl();
                 control.Initialize(this.Application, window, workbook, this);
 
-                var pane = this.CustomTaskPanes.Add(control, "Navigation", window);
+                // WPS attaches to the shared frame; binding to a document creates duplicate panes.
+                pane = IsWpsHost
+                    ? this.CustomTaskPanes.Add(control, "Navigation")
+                    : this.CustomTaskPanes.Add(control, "Navigation", window);
+                _windowPanes[hwnd] = (pane, control);
                 pane.DockPosition = Office.MsoCTPDockPosition.msoCTPDockPositionLeft;
                 pane.Width = 320;
                 pane.Visible = true;
-
-                _windowPanes[hwnd] = (pane, control);
             }
             catch (Exception ex)
             {
                 LogDebug($"为窗口创建导航窗格失败，窗口句柄: {hwnd}。", ex);
+                RemovePane(hwnd, (pane, control));
             }
+            finally { _creatingPaneKeys.Remove(hwnd); }
         }
 
         private bool TryGetControl(Excel.Window window, out NavigationPaneControl control)
@@ -250,7 +262,7 @@ namespace ExcelNavigatorPane
             try
             {
                 (CustomTaskPane Pane, NavigationPaneControl Control) item;
-                if (!_windowPanes.TryGetValue(window.Hwnd, out item)) return false;
+                if (!_windowPanes.TryGetValue(GetPaneKey(window), out item)) return false;
                 control = item.Control;
                 return control != null;
             }
@@ -261,7 +273,7 @@ namespace ExcelNavigatorPane
             }
         }
 
-        private void SafeRefresh(bool all)
+        internal void SafeRefresh(bool all)
         {
             try
             {
@@ -356,12 +368,27 @@ namespace ExcelNavigatorPane
 
         private void CleanupClosedPanes()
         {
+            // A closed WPS document may leave Pane.Window non-null. Use the live window set.
+            var liveHandles = new HashSet<int>();
+            try
+            {
+                if (!this.Application.Ready) return;
+                foreach (Excel.Window window in this.Application.Windows)
+                    liveHandles.Add(GetPaneKey(window));
+            }
+            catch (Exception ex)
+            {
+                LogDebug("读取现有窗口失败，暂缓清理导航窗格。", ex);
+                return;
+            }
             var handles = new List<int>();
             foreach (var item in _windowPanes)
             {
+                if (_creatingPaneKeys.Contains(item.Key)) continue;
                 try
                 {
-                    if (item.Value.Pane.Window == null) handles.Add(item.Key);
+                    if (!liveHandles.Contains(item.Key) || (!IsWpsHost && item.Value.Pane.Window == null))
+                        handles.Add(item.Key);
                 }
                 catch (Exception ex)
                 {
@@ -377,13 +404,20 @@ namespace ExcelNavigatorPane
             }
         }
 
+        private int GetPaneKey(Excel.Window window)
+        {
+            return IsWpsHost
+                ? NavigationPaneControl.GetHostFrame(new IntPtr(window.Hwnd), (uint)Process.GetCurrentProcess().Id).ToInt32()
+                : window.Hwnd;
+        }
+
         private void RemovePane(
             int hwnd,
             (CustomTaskPane Pane, NavigationPaneControl Control) item)
         {
             try
             {
-                this.CustomTaskPanes.Remove(item.Pane);
+                if (item.Pane != null) this.CustomTaskPanes.Remove(item.Pane);
             }
             catch (Exception ex)
             {
@@ -437,7 +471,7 @@ namespace ExcelNavigatorPane
             }
         }
 
-        internal void ToggleWorksheetVisibility(Excel.Worksheet worksheet, IWin32Window owner)
+        internal void ToggleWorksheetVisibility(Excel.Worksheet worksheet, NavigationPaneControl owner)
         {
             if (worksheet == null) return;
 
@@ -472,6 +506,7 @@ namespace ExcelNavigatorPane
                 else
                 {
                     worksheet.Visible = Excel.XlSheetVisibility.xlSheetVisible;
+                    owner.ActivateWorksheetCore(worksheet);
                 }
             }
             catch (Exception ex)

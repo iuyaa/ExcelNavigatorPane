@@ -49,6 +49,7 @@ namespace ExcelNavigatorPane
             public bool IsActive { get; set; }
             public Excel.XlSheetVisibility Visibility { get; set; }
             public bool IsProtected { get; set; }
+            public Color? TabColor { get; set; }
 
             public override string ToString()
             {
@@ -111,6 +112,7 @@ namespace ExcelNavigatorPane
 
         private ToolStrip _wsToolStrip;
         private ToolStripTextBox _txtFilter;
+        private ToolStripButton _btnClearFilter;
         private ToolStripButton _btnToggleHidden;
         private ToolStripButton _btnListHiddenSheets;
         private ToolStripButton _btnRecentSheets;
@@ -118,6 +120,8 @@ namespace ExcelNavigatorPane
         private Label _lblCounts;
 
         private ContextMenuStrip _workbookContextMenu;
+        private ToolStripItem[] _workbookTargetItems;
+        private Excel.Workbook _workbookMenuTarget;
         private ContextMenuStrip _worksheetContextMenu;
         private ToolStripMenuItem _showSelectedSheetMenuItem;
         private ToolStripMenuItem _veryHiddenInfoMenuItem;
@@ -407,6 +411,11 @@ namespace ExcelNavigatorPane
                         CodeName = codeName,
                         IsActive = isActive,
                         Visibility = visibility,
+                        TabColor = GetSafe(() =>
+                        {
+                            var tab = worksheet.Tab;
+                            return DecodeTabColor(tab.ColorIndex, tab.Color);
+                        }),
                         IsProtected = GetValue(
                             () => worksheet.ProtectContents,
                             reportErrors)
@@ -456,13 +465,15 @@ namespace ExcelNavigatorPane
                 AutoSize = true
             };
             _workbookHeading = new ToolStripLabel("工作簿") { Font = _titleFont };
-            var workbookActions = new ToolStripDropDownButton
+            var workbookActions = new ToolStripButton
             {
                 Image = CreateToolbarIcon("more"), DisplayStyle = ToolStripItemDisplayStyle.Image,
-                ToolTipText = "工作簿操作", AccessibleName = "工作簿操作", Alignment = ToolStripItemAlignment.Right,
-                ShowDropDownArrow = false
+                ToolTipText = "工作簿操作（也可右键工作簿区域）", AccessibleName = "工作簿操作", Alignment = ToolStripItemAlignment.Right
             };
-            workbookActions.DropDownItems.AddRange(CreateWorkbookMenuItems());
+            _workbookContextMenu = new ContextMenuStrip();
+            _workbookContextMenu.Items.AddRange(CreateWorkbookMenuItems());
+            workbookActions.Click += (sender, args) => ShowWorkbookMenu(_wbToolStrip,
+                new Point(workbookActions.Bounds.Left, workbookActions.Bounds.Bottom), GetCommandWorkbook());
             _btnWbSortAZ = new ToolStripMenuItem("名称升序 A–Z");
             _btnWbSortZA = new ToolStripMenuItem("名称降序 Z–A");
             var sortMenu = new ToolStripMenuItem("排序");
@@ -474,7 +485,7 @@ namespace ExcelNavigatorPane
                 if (!IsReadyForCommands()) return;
                 checkUpdates.Enabled = false;
                 checkUpdates.Text = "正在检查更新…";
-                string result;
+                UpdateChecker.UpdateInfo result;
                 try
                 {
                     result = await UpdateChecker.CheckAsync().ConfigureAwait(false);
@@ -482,24 +493,29 @@ namespace ExcelNavigatorPane
                 catch (Exception ex)
                 {
                     LogDebug("检查更新失败。", ex);
-                    result = "无法检查更新，请稍后重试。";
+                    result = new UpdateChecker.UpdateInfo { Message = "无法检查更新，请稍后重试。" };
                 }
                 if (IsDisposed) return;
                 _uiContext.Post(_ =>
                 {
-                    checkUpdates.ToolTipText = result;
+                    checkUpdates.ToolTipText = result.Message;
                     checkUpdates.Enabled = true;
                     checkUpdates.Text = "检查更新";
-                    if (IsReadyForCommands()) ShowInformation(result);
+                    if (IsReadyForCommands())
+                    {
+                        if (result.DownloadUrl == null) ShowInformation(result.Message);
+                        else if (MessageBox.Show(this, result.Message, "Excel Navigator", MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Information) == DialogResult.Yes) DownloadUpdate(result, checkUpdates);
+                    }
                     else checkUpdates.Text = "更新检查完成（悬停查看）";
                 }, null);
             };
-            workbookActions.DropDownItems.AddRange(new ToolStripItem[] { new ToolStripSeparator(), sortMenu, checkUpdates, help });
+            _workbookContextMenu.Items.AddRange(new ToolStripItem[] { new ToolStripSeparator(), sortMenu, checkUpdates, help });
             var newWorkbook = new ToolStripButton { Image = CreateToolbarIcon("add"), DisplayStyle = ToolStripItemDisplayStyle.Image,
                 ToolTipText = "新建工作簿", AccessibleName = "新建工作簿", Alignment = ToolStripItemAlignment.Right };
             newWorkbook.Click += (sender, args) => NewWorkbook();
             var refreshWorkbooks = new ToolStripMenuItem("刷新列表");
-            workbookActions.DropDownItems.Add(refreshWorkbooks);
+            _workbookContextMenu.Items.Add(refreshWorkbooks);
             _wbToolStrip.Items.AddRange(new ToolStripItem[] { _workbookHeading, workbookActions, newWorkbook });
 
             _lbWorkbooks = new NavigationListBox
@@ -521,6 +537,23 @@ namespace ExcelNavigatorPane
             _lbWorkbooks.MouseUp += (sender, e) =>
             {
                 if (e.Button == MouseButtons.Right) LbWorkbooks_MouseClick(sender, e);
+            };
+            _lbWorkbooks.KeyDown += (sender, e) =>
+            {
+                if (e.KeyCode != Keys.Apps && !(e.Shift && e.KeyCode == Keys.F10)) return;
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                int selected = _lbWorkbooks.SelectedIndex;
+                ShowWorkbookMenu(_lbWorkbooks, selected < 0 ? Point.Empty : _lbWorkbooks.GetItemRectangle(selected).Location,
+                    (_lbWorkbooks.SelectedItem as WbItem)?.Workbook);
+            };
+            _workbookPanel.MouseUp += (sender, e) =>
+            {
+                if (e.Button == MouseButtons.Right) ShowWorkbookMenu(_workbookPanel, e.Location, null);
+            };
+            _wbToolStrip.MouseUp += (sender, e) =>
+            {
+                if (e.Button == MouseButtons.Right) ShowWorkbookMenu(_wbToolStrip, e.Location, null);
             };
 
             _workbookPanel.Controls.Add(_lbWorkbooks);
@@ -550,9 +583,13 @@ namespace ExcelNavigatorPane
             var searchIcon = new ToolStripLabel { Image = CreateToolbarIcon("search"), DisplayStyle = ToolStripItemDisplayStyle.Image };
             _txtFilter = new ToolStripTextBox { AutoSize = false, Width = 220, BorderStyle = BorderStyle.None,
                 BackColor = ColorSidebar, Font = _baseFont, ToolTipText = "按名称筛选工作表", AccessibleName = "搜索工作表" };
-            searchStrip.Items.AddRange(new ToolStripItem[] { searchIcon, _txtFilter });
+            _btnClearFilter = new ToolStripButton { Image = CreateToolbarIcon("close"), DisplayStyle = ToolStripItemDisplayStyle.Image,
+                ToolTipText = "清除搜索", AccessibleName = "清除搜索", Alignment = ToolStripItemAlignment.Right,
+                AutoSize = false, Width = 24, Available = false, Overflow = ToolStripItemOverflow.Never };
+            _btnClearFilter.Click += (sender, args) => { _txtFilter.Clear(); _txtFilter.Focus(); };
+            searchStrip.Items.AddRange(new ToolStripItem[] { searchIcon, _txtFilter, _btnClearFilter });
             searchStrip.SizeChanged += (sender, args) =>
-                _txtFilter.Width = Math.Max(40, searchStrip.ClientSize.Width - searchStrip.Padding.Horizontal - searchIcon.Width - 12);
+                _txtFilter.Width = Math.Max(40, searchStrip.ClientSize.Width - searchStrip.Padding.Horizontal - searchIcon.Width - _btnClearFilter.Width - 12);
             _txtFilter.TextBox.HandleCreated += (sender, args) =>
                 SendMessage(_txtFilter.TextBox.Handle, 0x1501, new IntPtr(1), "搜索工作表…");
 
@@ -643,11 +680,45 @@ namespace ExcelNavigatorPane
             _btnListHiddenSheets.Click += (sender, args) => RunUserAction(
                 "无法筛选隐藏工作表", ToggleListedHiddenSheets);
             _btnRecentSheets.Click += (sender, args) => ToggleRecentSheets();
-            _txtFilter.TextChanged += (sender, args) => RefreshWorksheets();
+            _txtFilter.TextChanged += (sender, args) =>
+            {
+                _btnClearFilter.Available = _txtFilter.Text.Length > 0;
+                RefreshWorksheets();
+            };
             help.Click += (sender, args) => ShowInformation(
                 "Excel Navigator " + UpdateChecker.CurrentVersion + "\n工作簿和表导航模块");
 
             InitializeContextMenus();
+        }
+
+        private async void DownloadUpdate(UpdateChecker.UpdateInfo release, ToolStripMenuItem button)
+        {
+            if (!IsReadyForCommands()) return;
+            string path;
+            using (var dialog = new SaveFileDialog { Filter = "安装程序 (*.exe)|*.exe", OverwritePrompt = true,
+                FileName = "ExcelNavigator-Setup-" + release.Version + ".exe" })
+            {
+                if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                path = dialog.FileName;
+            }
+            button.Enabled = false;
+            button.Text = "正在下载安装包…";
+            string message;
+            try
+            {
+                await UpdateChecker.DownloadAsync(release, path).ConfigureAwait(false);
+                message = "安装包已下载并校验：\n" + path + "\n请保存工作并关闭 Excel 和 WPS 表格，再运行此文件升级。";
+            }
+            catch (Exception ex) { LogDebug("下载安装包失败。", ex); message = "下载未完成，原有文件保持不变，请稍后重试。"; }
+            if (IsDisposed) return;
+            _uiContext.Post(_ =>
+            {
+                button.Enabled = true;
+                button.ToolTipText = message;
+                button.Text = "检查更新";
+                if (IsReadyForCommands()) ShowInformation(message);
+                else button.Text = "下载结果（悬停查看）";
+            }, null);
         }
 
         private bool ShouldListWorksheet(string name, Excel.XlSheetVisibility visibility, string filter)
@@ -779,22 +850,34 @@ namespace ExcelNavigatorPane
 
         private ToolStripItem[] CreateWorkbookMenuItems()
         {
+            _workbookTargetItems = new ToolStripItem[]
+            {
+                new ToolStripSeparator(),
+                new ToolStripMenuItem("保存", null, (sender, args) => SaveWorkbook(_workbookMenuTarget)),
+                new ToolStripMenuItem("重命名...", null, (sender, args) => RenameWorkbook(_workbookMenuTarget)),
+                new ToolStripMenuItem("关闭", null, (sender, args) => CloseWorkbook(_workbookMenuTarget))
+            };
             return new ToolStripItem[]
             {
                 new ToolStripMenuItem("新建", null, (sender, args) => NewWorkbook()),
-                new ToolStripMenuItem("打开...", null, (sender, args) => OpenWorkbook()),
-                new ToolStripSeparator(),
-                new ToolStripMenuItem("保存", null, (sender, args) => SaveWorkbook(GetCommandWorkbook())),
-                new ToolStripMenuItem("重命名...", null, (sender, args) => RenameWorkbook(GetCommandWorkbook())),
-                new ToolStripMenuItem("关闭", null, (sender, args) => CloseWorkbook(GetCommandWorkbook()))
-            };
+                new ToolStripMenuItem("打开...", null, (sender, args) => OpenWorkbook())
+            }.Concat(_workbookTargetItems).ToArray();
+        }
+
+        private void PrepareWorkbookMenu(Excel.Workbook target)
+        {
+            _workbookMenuTarget = target;
+            foreach (var item in _workbookTargetItems) item.Available = target != null;
+        }
+
+        private void ShowWorkbookMenu(Control source, Point location, Excel.Workbook target)
+        {
+            PrepareWorkbookMenu(target);
+            _workbookContextMenu.Show(source, location);
         }
 
         private void InitializeContextMenus()
         {
-            _workbookContextMenu = new ContextMenuStrip();
-            _workbookContextMenu.Items.AddRange(CreateWorkbookMenuItems());
-
             _worksheetContextMenu = new ContextMenuStrip();
             _showSelectedSheetMenuItem = new ToolStripMenuItem(
                 "显示此工作表",
@@ -901,6 +984,14 @@ namespace ExcelNavigatorPane
             }
 
             DrawNavigationIcon(e.Graphics, new Rectangle(e.Bounds.Left + 9, e.Bounds.Top + (e.Bounds.Height - 16) / 2, 16, 16), "sheet", item.IsActive ? ColorExcelGreen : ColorTextSub);
+            if (item.TabColor.HasValue)
+            {
+                var stripe = new Rectangle(e.Bounds.Left + 27, e.Bounds.Top + (e.Bounds.Height - 16) / 2, 3, 16);
+                using (var brush = new SolidBrush(item.TabColor.Value)) e.Graphics.FillRectangle(brush, stripe);
+                // Outline keeps white and pale tab colors visible on every row background.
+                using (var pen = new Pen(Color.FromArgb(180, 190, 184)))
+                    e.Graphics.DrawRectangle(pen, stripe.Left - 1, stripe.Top - 1, stripe.Width + 1, stripe.Height + 1);
+            }
             if ((e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
 
             Font font = item.IsActive ? _boldFont : e.Font;
@@ -926,6 +1017,13 @@ namespace ExcelNavigatorPane
                 lockRect,
                 item.IsProtected ? "lock" : "unlock",
                 lockRect.Contains(_mouseLocWs));
+        }
+
+        private static Color? DecodeTabColor(object colorIndex, object color)
+        {
+            // No-color tabs may report Color=0; ColorIndex distinguishes them from real black tabs.
+            if (colorIndex == null || Convert.ToInt32(colorIndex) <= 0 || color == null || color is bool) return null;
+            return ColorTranslator.FromOle(Convert.ToInt32(color));
         }
 
         private static Rectangle GetWbCloseRect(Rectangle bounds)
@@ -971,6 +1069,12 @@ namespace ExcelNavigatorPane
         private async void LbWorkbooks_MouseClick(object sender, MouseEventArgs e)
         {
             int index = _lbWorkbooks.IndexFromPoint(e.Location);
+            if (e.Button == MouseButtons.Right)
+            {
+                if (index >= 0) _lbWorkbooks.SelectedIndex = index;
+                ShowWorkbookMenu(_lbWorkbooks, e.Location, index < 0 ? null : ((WbItem)_lbWorkbooks.Items[index]).Workbook);
+                return;
+            }
             if (index < 0) return;
 
             object previous = _lbWorkbooks.SelectionBeforeClick;
@@ -985,10 +1089,6 @@ namespace ExcelNavigatorPane
             {
                 await RunNavigationAsync(_lbWorkbooks, previous, item,
                     "无法切换工作簿", () => NavigateWorkbookAsync(item));
-            }
-            else if (e.Button == MouseButtons.Right)
-            {
-                _workbookContextMenu.Show(_lbWorkbooks, e.Location);
             }
         }
 
@@ -1207,7 +1307,7 @@ namespace ExcelNavigatorPane
         private bool IsReadyForCommands()
         {
             return !_nativeNavigationInput && GetSafe(() => _app != null && _app.Ready &&
-                _app.CommandBars.GetEnabledMso("FileNewDefault"));
+                (_addIn?.IsWpsHost == true || _app.CommandBars.GetEnabledMso("FileNewDefault")));
         }
 
         private delegate IntPtr MouseHookProc(int code, IntPtr message, IntPtr data);
@@ -1308,7 +1408,7 @@ namespace ExcelNavigatorPane
         private void EnsureReady()
         {
             if (!IsReadyForCommands())
-                throw new InvalidOperationException("Excel 正在编辑或忙碌，请结束编辑后重试此命令。");
+                throw new InvalidOperationException("表格程序正在编辑或忙碌，请结束编辑后重试此命令。");
         }
 
         private void CacheWindowIdentity()
@@ -1350,6 +1450,14 @@ namespace ExcelNavigatorPane
 
         private async Task NavigateWorkbookAsync(WbItem item)
         {
+            if (_addIn.IsWpsHost)
+            {
+                // A shared WPS frame cannot select a workbook tab by foreground HWND alone.
+                EnsureReady();
+                ActivateWorkbookCore(item.Workbook);
+                _addIn.SafeRefresh(all: true);
+                return;
+            }
             // Read Ready only on Excel's UI thread; a rejected read also takes the native path.
             bool ready = IsReadyForCommands();
             if (ready)
@@ -1384,6 +1492,9 @@ namespace ExcelNavigatorPane
                 ActivateWorksheetCore(item.Worksheet);
                 return;
             }
+
+            if (_addIn.IsWpsHost)
+                throw new InvalidOperationException("WPS 正在编辑或忙碌，请结束编辑后切换工作表。");
 
             IntPtr hwnd = _windowHwnd;
             uint processId = _excelProcessId;
@@ -1424,6 +1535,18 @@ namespace ExcelNavigatorPane
             if (processId == 0 || !IsWindow(hwnd) || actualProcessId != processId ||
                 className.ToString() != "XLMAIN" || GetAncestor(hwnd, 2) != hwnd)
                 throw new InvalidOperationException("目标 Excel 窗口已失效，请结束编辑后刷新列表。");
+        }
+
+        internal static IntPtr GetHostFrame(IntPtr document, uint processId)
+        {
+            IntPtr frame = GetAncestor(document, 2); // GA_ROOT: one pane per actual WPS frame.
+            uint documentProcess, frameProcess;
+            GetWindowThreadProcessId(document, out documentProcess);
+            GetWindowThreadProcessId(frame, out frameProcess);
+            if (processId == 0 || !IsWindow(document) || !IsWindow(frame) ||
+                documentProcess != processId || frameProcess != processId)
+                throw new InvalidOperationException("目标宿主窗口已失效，请刷新列表。");
+            return frame;
         }
 
         private static void ForegroundExcelWindow(IntPtr hwnd, uint processId)
@@ -1497,7 +1620,7 @@ namespace ExcelNavigatorPane
             if (workbook.Windows.Count > 0) workbook.Windows[1].Activate();
         }
 
-        private void ActivateWorksheetCore(Excel.Worksheet worksheet)
+        internal void ActivateWorksheetCore(Excel.Worksheet worksheet)
         {
             EnsureReady();
             var parent = worksheet.Parent as Excel.Workbook;
@@ -1813,6 +1936,7 @@ namespace ExcelNavigatorPane
             _currentWorksheet = null;
             _addIn = null;
             _workbook = null;
+            _workbookMenuTarget = null;
             _window = null;
             _app = null;
             base.Dispose(disposing);

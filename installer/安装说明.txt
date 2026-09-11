@@ -1,26 +1,41 @@
-Excel Navigator 内部试用版
+﻿Excel Navigator {VERSION} 内部试用版
 
-适用环境：Windows 10/11 桌面版 Microsoft Excel。
-目前已验证开发机 Excel x64；其他电脑及 Excel x86 需试用验证。
-不支持 Mac、网页版 Excel 或 WPS。无需安装 Visual Studio。
+适用环境：Windows 10/11 桌面版 Microsoft Excel（x86 或 x64）。
+不支持 Mac、网页版 Excel 或 ARM64 原生 Excel。用户无需 Visual Studio。
+对已能自动加载此插件的 WPS 表格环境增加兼容修复；64 位 Windows 同时注册 32/64 位加载项，尚未适配只有 WPS 的电脑。
 
 安装：
-1. 保存工作并关闭 Excel。
-2. 双击 ExcelNavigator-Setup-{VERSION}.exe，按提示继续。
-3. 缺少 .NET Framework 4.8 或 VSTO Runtime 时，安装程序会联网下载依赖，可能要求管理员权限或重启。
-4. 确认安装来源后，在 VSTO 安装提示中完成安装。
-5. 重新打开 Excel，检查导航栏；也可在“文件 → 选项 → 加载项 → COM 加载项”中查看 ExcelNavigatorPane。
+1. 保存工作并关闭所有 Excel 和 WPS 表格窗口。
+2. 如果安装过旧 ClickOnce 版，先到“控制面板 → 程序和功能”卸载 ExcelNavigatorPane。
+   开发机遇到 bin/Debug 或 bin/Release 注册时，可在安装器中确认备份并移除；不删除项目文件。其他冲突仍需维护人员处理。
+3. 双击 ExcelNavigator-Setup-{VERSION}.exe，安装器按 Windows 位数选择内置 MSI；64 位 Windows 同时支持 32/64 位 Excel/WPS。
+4. 安装需要管理员授权；缺少 .NET Framework 4.8 或 VSTO Runtime 时由微软引导程序联网下载。
+5. 重新打开 Excel，在“文件 → 选项 → 加载项 → COM 加载项”中查看 Excel Navigator。
 
-此版本使用开发测试证书，可能显示发布者未知或信任提示。
-如果公司策略阻止安装，请交给 IT 确认证书和加载项策略，不要关闭 Office 安全保护。
-安装程序不会自动导入根证书、关闭 Excel 或修改 Office 安全策略。
+安装到 Program Files，使用本地 VSTO 加载，不再从网址安装 ClickOnce。
+无需手工导入内部根证书。Windows 仍可能提示未知发布者；公司策略限制时请联系 IT。
+安装器不会自动关闭 Excel，不会导入根证书或关闭 Office 安全保护。
+如果安装前仍有 Excel 进程或旧的当前用户加载项注册，EXE 会停止并说明原因。
 
-卸载：在 Windows“控制面板 → 程序和功能”中找到 ExcelNavigatorPane 并卸载。
-安装源保存在 %LOCALAPPDATA%\ExcelNavigatorPane\Installer；此目录仅为安装缓存，卸载后可自行删除。
-{UPDATE_STATUS}
-配置更新地址的版本由 Office/VSTO 在启动时检查更新；使用过程中不会由插件强制关闭或重启 Excel。
-导航栏工作簿菜单“检查更新”可手动查询版本；此操作仅查询，不安装，发现新版后请在方便时保存工作、关闭所有 Excel 窗口并重新打开。
-旧安装包未配置在线地址的用户，需要先运行一次配置好更新地址的新安装包。
+更新：
+在导航栏工作簿菜单中选择“检查更新”，发现新版后选择是否下载并指定保存位置。
+清单签名与 EXE 哈希验证通过后才保留安装包；下载失败不替换原有文件。
+下载完成后，保存工作、关闭所有 Excel 和 WPS 表格，再运行新版 EXE。无需再卸载 MSI 版。
+不在启动时自动检查更新，不自动执行下载的安装包，不强制重启 Excel。
+旧 ClickOnce 版需要首次手工迁移到本安装包，之后使用此更新方式。
 
-本包已验证发布、签名存在、解包以及文件校验；尚未完成无开发环境电脑的实际安装/加载/卸载验收。
-首次建议只发给一位同事试装。遇到失败，请记录错误全文以及 Windows、Excel 版本和位数。
+卸载：在 Windows“控制面板 → 程序和功能”中找到 Excel Navigator 并卸载。
+安装源保存在 %LOCALAPPDATA%\ExcelNavigatorPane\Installer\版本号，供修复使用。
+卸载后可自行清理安装缓存。
+
+IT 手动部署可使用对应 Windows 位数的 MSI，必须先准备运行环境、关闭 Excel并移除旧 ClickOnce 注册。
+同一版本不要混用 x86/x64 MSI，不支持降级。
+
+本包已通过构建、EXE 解包哈希、MSI 注册/升级规则和签名更新清单校验。
+WPS 修复：同一主窗口共用导航栏、使用宿主接口切换工作簿、按实际打开窗口清理；Excel/WPS 单张表取消隐藏后自动切换过去。
+WPS 编辑中切换暂不支持；真实 WPS 点击、关闭工作簿及编辑状态回归仍待验收（NOT_RUN）。
+无开发环境电脑上的首次安装、加载、真实升级/回滚/卸载尚未验收（NOT_RUN）。
+若尚未上传更新入口清单，“检查更新”会提示失败，不影响插件使用。
+建议先在独立电脑验收；失败时记录错误全文、Windows/Excel 版本及 Excel 位数。
+
+开发注册迁移备份：HKCU\Software\ExcelNavigatorPane\RegistrationBackups，具体路径记在安装日志中。若迁移后取消或安装失败，备份仍保留，可由维护人员恢复；无需删除项目目录。

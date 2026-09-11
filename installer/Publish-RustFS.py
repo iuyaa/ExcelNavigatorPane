@@ -1,36 +1,54 @@
-"""Upload the verified release artifacts; promote the VSTO entry last.
+"""Upload the verified EXE/MSI release; promote signed latest.xml last.
 
-Requires locally installed boto3, python-dotenv, requests. Dry-run unless --apply.
+Requires boto3, python-dotenv, requests, cryptography. Dry-run unless --apply.
 Never removes old objects or overwrites differing immutable release files.
 """
 import argparse
+import base64
 import hashlib
 import json
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from urllib.parse import quote, urlsplit
-from zipfile import ZipFile
 
 import boto3
 import requests
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from dotenv import dotenv_values
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 
 def version_of(data):
     if len(data) > 1024 * 1024 or b'<!DOCTYPE' in data.upper():
-        raise ValueError('Invalid deployment manifest')
+        raise ValueError('Invalid update manifest')
     root = ET.fromstring(data)
-    ns = '{urn:schemas-microsoft-com:asm.v1}'
-    identity = root.find(ns + 'assemblyIdentity')
-    if root.tag != ns + 'assembly' or identity is None or identity.get('name') != 'ExcelNavigatorPane.vsto':
-        raise ValueError('Wrong deployment manifest')
-    version = identity.get('version', '')
-    if not re.fullmatch(r'\d+\.\d+\.\d+\.\d+', version):
+    if root.tag != 'release' or len(root) or root.get('product') != 'ExcelNavigatorPane':
+        raise ValueError('Wrong update manifest')
+    version = root.get('version', '')
+    if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.0', version):
         raise ValueError('Invalid version')
-    return tuple(map(int, version.split('.')))
+    parts = tuple(map(int, version.split('.')))
+    if parts[0] > 255 or parts[1] > 255 or parts[2] > 65535 or parts < (1, 0, 1, 0):
+        raise ValueError('Version exceeds MSI limits')
+    if (root.get('file') != f'releases/{version}/ExcelNavigator-Setup-{version}.exe'
+            or not re.fullmatch(r'[0-9a-f]{64}', root.get('sha256', ''))):
+        raise ValueError('Invalid installer path or hash')
+    return parts
+
+
+def verify_release(manifest, public_key):
+    version_of(manifest)
+    root = ET.fromstring(manifest)
+    key = ET.fromstring(public_key)
+    number = lambda name: int.from_bytes(base64.b64decode(key.findtext(name), validate=True), 'big')
+    public = rsa.RSAPublicNumbers(number('Exponent'), number('Modulus')).public_key()
+    message = '\n'.join(root.attrib[name] for name in ('product', 'version', 'file', 'sha256'))
+    public.verify(base64.b64decode(root.get('signature', ''), validate=True), message.encode(),
+                  padding.PKCS1v15(), hashes.SHA256())
+    return root
 
 
 def main():
@@ -52,35 +70,25 @@ def main():
     if bucket != 'excel-navigation' or values.get('TYAPP_S3_FORCE_PATH_STYLE', '').lower() != 'true':
         raise ValueError('Wrong bucket or addressing mode')
     base = endpoint + '/' + bucket + '/'
-    archive = args.directory / ('ExcelNavigator-Publish-' + args.version + '.zip')
-    files = {}
-    with ZipFile(archive) as zipped:
-        for entry in zipped.infolist():
-            if entry.is_dir():
-                continue
-            name = entry.filename.replace('\\', '/')
-            if (any(part in ('', '.', '..') for part in name.split('/'))
-                    or ':' in name or name in files or entry.file_size > 128 * 1024 * 1024):
-                raise ValueError('Invalid archive entry')
-            files[name] = zipped.read(entry)
-    manifest = files.get('ExcelNavigatorPane.vsto', b'')
+    manifest = (args.directory / 'latest.xml').read_bytes()
     version = tuple(map(int, args.version.split('.')))
     if version_of(manifest) != version:
-        raise ValueError('Archive version mismatch')
-    if (base.encode('utf-16le') not in files.get('setup.exe', b'')):
-        raise ValueError('Bootstrapper does not point to this update directory')
+        raise ValueError('Manifest version mismatch')
+    release = verify_release(manifest, (args.directory / 'update-public-key.xml').read_bytes())
     exe = 'ExcelNavigator-Setup-' + args.version + '.exe'
     installer = (args.directory / exe).read_bytes()
     checksum = (args.directory / (exe + '.sha256')).read_bytes()
     if checksum.decode('ascii').split()[0].lower() != hashlib.sha256(installer).hexdigest():
         raise ValueError('Installer checksum mismatch')
-    for name, content in {exe: installer, exe + '.sha256': checksum,
-                          archive.name: archive.read_bytes(),
-                          '安装说明.txt': (args.directory / '安装说明.txt').read_bytes()}.items():
-        files['releases/' + args.version + '/' + name] = content
-    # First all immutable assets, then bootstrapper resources, finally the live entry.
-    immutable = lambda key: key.startswith(('Application Files/', 'releases/'))
-    ordered = sorted(files, key=lambda key: (2 if key == 'ExcelNavigatorPane.vsto' else 0 if immutable(key) else 1, key))
+    if release.get('sha256') != hashlib.sha256(installer).hexdigest():
+        raise ValueError('Signed installer hash mismatch')
+    names = [exe, exe + '.sha256', '安装说明.txt', 'latest.xml', 'update-public-key.xml']
+    names += [f'ExcelNavigator-{args.version}-{arch}.msi' for arch in ('x86', 'x64')]
+    files = {'releases/' + args.version + '/' + name: (args.directory / name).read_bytes() for name in names}
+    files['latest.xml'] = manifest
+    # Keep old ClickOnce objects untouched; promote only the new MSI update entry.
+    immutable = lambda key: key.startswith('releases/')
+    ordered = sorted(files, key=lambda key: (key == 'latest.xml', key))
     print(('APPLY' if args.apply else 'DRY RUN') + ': ' + args.version + ', ' + str(len(files)) + ' objects -> ' + base)
     if not args.apply:
         return
@@ -104,7 +112,7 @@ def main():
                 return None
             raise
 
-    previous = existing('ExcelNavigatorPane.vsto')
+    previous = existing('latest.xml')
     if previous is not None and (version_of(previous) > version or
             (version_of(previous) == version and previous != manifest)):
         raise ValueError('Refusing downgrade or different artifacts with the same version')
@@ -117,17 +125,15 @@ def main():
                 raise ValueError('Immutable remote artifact differs: ' + key)
     hashes = {}
     for key in ordered:
-        if key == 'ExcelNavigatorPane.vsto' and existing(key) != previous:
+        if key == 'latest.xml' and existing(key) != previous:
             raise ValueError('Live manifest changed during upload; stop and inspect')
         data = files[key]
         if present.get(key) != data:
             client.put_object(Bucket=bucket, Key=key, Body=data, CacheControl='no-store',
-                              ContentType='application/x-ms-vsto' if key.endswith('.vsto') else 'application/octet-stream')
+                              ContentType='application/xml' if key.endswith('.xml') else 'application/octet-stream')
         response = session.get(base + quote(key, safe='/'), timeout=30, allow_redirects=False)
         if response.status_code != 200 or response.content != data:
             raise ValueError('Anonymous download verification failed: ' + key)
-        if key == 'ExcelNavigatorPane.vsto' and response.headers.get('Content-Type', '').split(';')[0] != 'application/x-ms-vsto':
-            raise ValueError('Incorrect public VSTO content type')
         hashes[key] = hashlib.sha256(data).hexdigest()
     report = args.directory / 'rustfs-publish.json'
     report.write_text(json.dumps({'version': args.version, 'base_url': base, 'sha256': hashes},

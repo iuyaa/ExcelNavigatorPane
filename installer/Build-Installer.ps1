@@ -1,77 +1,118 @@
-param(
-    [string]$Version = '1.0.0.2',
-    [string]$UpdateBaseUrl,
+﻿param(
+    [string]$Version = '1.0.9.0',
+    [string]$UpdateBaseUrl = 'https://oneview.jiarui.net.cn/excel-navigation/',
     [string]$OutputDirectory,
     [string]$CertificateThumbprint,
-    [string]$MSBuild = 'F:\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe'
+    [string]$MSBuild = 'F:\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe',
+    [string]$Wix,
+    [string]$BootstrapperPath = 'C:\Program Files (x86)\Microsoft SDKs\ClickOnce Bootstrapper'
 )
 $ErrorActionPreference = 'Stop'
-if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'Version must contain four numeric components.' }
-$parsedVersion = [version]$Version
-if ($parsedVersion -lt [version]'1.0.0.0') { throw 'Version must be at least 1.0.0.0.' }
-$manifestUrl = ''
-if ($UpdateBaseUrl) {
-    $updateUri = $null
-    if (![uri]::TryCreate($UpdateBaseUrl, [UriKind]::Absolute, [ref]$updateUri) -or
-        $updateUri.Scheme -ne 'https' -or $updateUri.UserInfo -or $updateUri.Query -or $updateUri.Fragment -or
-        $UpdateBaseUrl -match '[;\r\n]') { throw 'UpdateBaseUrl must be a fixed HTTPS directory URL without credentials, query or fragment.' }
-    $UpdateBaseUrl = $updateUri.AbsoluteUri.TrimEnd('/') + '/'
-    $manifestUrl = $UpdateBaseUrl + 'ExcelNavigatorPane.vsto'
-}
+# MSI compares three version fields; reserve the fourth field as zero.
+if ($Version -notmatch '^\d+\.\d+\.\d+\.0$') { throw 'MSI versions must have the form major.minor.build.0.' }
+$parsed = [version]$Version
+if ($parsed.ToString() -ne $Version) { throw 'Version fields must not contain leading zeros.' }
+if ($parsed.Major -gt 255 -or $parsed.Minor -gt 255 -or $parsed.Build -gt 65535 -or $parsed -lt [version]'1.0.1.0') { throw 'Version exceeds MSI limits or predates MSI migration.' }
 $repo = Split-Path $PSScriptRoot -Parent
-if ($CertificateThumbprint) {
-    $certificate = Get-Item "Cert:\CurrentUser\My\$CertificateThumbprint"
-} else {
-    $certificate = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Where-Object {
+if (!$Wix) { $Wix = Join-Path $repo 'work\tools\wix\wix.exe' }
+if (!(Test-Path $Wix)) { throw 'Install build tool: dotnet tool install wix --version 4.0.6 --tool-path work/tools/wix' }
+$uri = $null
+if (![uri]::TryCreate($UpdateBaseUrl, [UriKind]::Absolute, [ref]$uri) -or $uri.Scheme -ne 'https' -or
+    $uri.UserInfo -or $uri.Query -or $uri.Fragment -or $UpdateBaseUrl -match '[;\r\n]') { throw 'A fixed HTTPS update directory is required.' }
+$UpdateBaseUrl = $uri.AbsoluteUri.TrimEnd('/') + '/'
+$certificate = if ($CertificateThumbprint) { Get-Item "Cert:\CurrentUser\My\$CertificateThumbprint" } else {
+    $candidates = @(Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert | Where-Object {
         $_.Subject -eq 'CN=Excel Navigator Internal Test' -and $_.HasPrivateKey -and $_.NotAfter -gt (Get-Date)
-    } | Sort-Object NotAfter -Descending | Select-Object -First 1
-    if (!$certificate) {
-        # Creates a signing identity only; never adds it to Root or TrustedPublisher.
-        $certificate = New-SelfSignedCertificate -Type CodeSigningCert -Subject 'CN=Excel Navigator Internal Test' -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddYears(1)
-    }
+    })
+    if ($candidates.Count -ne 1) { throw 'Specify the existing release CertificateThumbprint; update signing keys must not change implicitly.' }
+    $candidates[0]
 }
-$thumbprint = $certificate.Thumbprint
-if (!$certificate.HasPrivateKey -or $certificate.NotAfter -le (Get-Date)) { throw 'A valid signing certificate with a private key is required.' }
-$stage = Join-Path $repo ('work\installer\build-' + [guid]::NewGuid().ToString('N'))
-$publish = Join-Path $stage 'publish'
-$dist = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $repo 'dist' }
-New-Item -ItemType Directory -Path $publish, $dist -Force | Out-Null
+if (!$certificate -or !$certificate.HasPrivateKey -or $certificate.NotAfter -le (Get-Date)) { throw 'Existing release signing certificate required; do not rotate the update key implicitly.' }
+$rsa = [System.Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($certificate)
+$stage = Join-Path $repo ('work\installer\msi-' + [guid]::NewGuid().ToString('N'))
+$app = Join-Path $stage 'app'; $payload = Join-Path $stage 'payload'
+$dist = if ($OutputDirectory) { [IO.Path]::GetFullPath($OutputDirectory) } else { Join-Path $repo "dist\releases\$Version" }
+New-Item -ItemType Directory -Path $app,$payload,$dist -Force | Out-Null
 $settingsFile = Join-Path $stage 'UpdateSettings.xml'
-$settingsXml = New-Object System.Xml.XmlDocument
-$settingsNode = $settingsXml.CreateElement('updates')
-$settingsNode.SetAttribute('version', $Version)
-$settingsNode.SetAttribute('manifestUrl', $manifestUrl)
-[void]$settingsXml.AppendChild($settingsNode)
-$settingsXml.Save($settingsFile)
-$updateEnabled = if ($manifestUrl) { 'true' } else { 'false' }
-& $MSBuild (Join-Path $repo 'ExcelNavigatorPane.csproj') /t:Rebuild,Publish /p:Configuration=Release /p:Platform=AnyCPU "/p:PublishDir=$publish\" "/p:PublishUrl=$publish\" "/p:ApplicationVersion=$Version" "/p:UpdateSettingsFile=$settingsFile" "/p:ManifestCertificateThumbprint=$thumbprint" /p:ManifestKeyFile= "/p:UpdateEnabled=$updateEnabled" /p:UpdateInterval=0 /p:UpdateIntervalUnits=days "/p:InstallUrl=$UpdateBaseUrl" /p:BootstrapperEnabled=true "/p:IsWebBootstrapper=$updateEnabled" /p:Install=true /nologo /verbosity:minimal
-if ($LASTEXITCODE -ne 0) { throw 'ClickOnce publish failed.' }
-
+$settings = [xml]::new(); $node = $settings.CreateElement('updates')
+$node.SetAttribute('version', $Version); $node.SetAttribute('manifestUrl', $UpdateBaseUrl + 'latest.xml')
+$key = $settings.CreateElement('publicKey'); $key.InnerText = $rsa.ToXmlString($false)
+[void]$node.AppendChild($key); [void]$settings.AppendChild($node); $settings.Save($settingsFile)
+function Read-AddinRegistration {
+    $snapshot = foreach ($view in @([Microsoft.Win32.RegistryView]::Registry32, [Microsoft.Win32.RegistryView]::Registry64)) {
+        $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser, $view)
+        $registration = $root.OpenSubKey('Software\Microsoft\Office\Excel\Addins\ExcelNavigatorPane')
+        try {
+            $values = [ordered]@{}
+            if ($registration) { foreach ($name in ($registration.GetValueNames() | Sort-Object)) { $values[$name] = @($registration.GetValueKind($name).ToString(), $registration.GetValue($name)) } }
+            [ordered]@{ View = $view.ToString(); Exists = $null -ne $registration; Values = $values }
+        } finally { if ($registration) { $registration.Dispose() }; $root.Dispose() }
+    }
+    ConvertTo-Json -InputObject $snapshot -Depth 5 -Compress
+}
+$registrationBefore = Read-AddinRegistration
+# Remove only the build's staging-path inclusion entry; never register/unregister the active add-in.
+& $MSBuild (Join-Path $repo 'ExcelNavigatorPane.csproj') '/t:Rebuild;RemoveOfficeAddInSecurity' /p:Configuration=Release /p:Platform=AnyCPU /p:BuildInstaller=true "/p:OutputPath=$app\" "/p:ApplicationVersion=$Version" "/p:UpdateSettingsFile=$settingsFile" "/p:ManifestCertificateThumbprint=$($certificate.Thumbprint)" /p:ManifestKeyFile= /p:UpdateEnabled=false /p:BootstrapperEnabled=false /nologo /verbosity:minimal
+if ($LASTEXITCODE -ne 0) { throw 'VSTO local payload build failed.' }
+if ((Read-AddinRegistration) -cne $registrationBefore) { throw 'VSTO build changed the existing add-in registration; packaging stopped.' }
+if ((Get-Item (Join-Path $app 'ExcelNavigatorPane.dll')).VersionInfo.FileVersion -ne $Version) {
+    throw 'AssemblyFileVersion in Properties/AssemblyInfo.cs must match the MSI release version so Windows Installer replaces the DLL.'
+}
+$appFiles = @(Get-ChildItem $app -File | Where-Object { $_.Name -match '\.(dll|manifest|vsto|config)$' })
+if ($appFiles.Count -lt 4) { throw 'Incomplete VSTO payload.' }
+$components = @(); $references = @(); $index = 0
+foreach ($file in $appFiles) {
+    $id = 'Payload' + $index++; $escaped = [Security.SecurityElement]::Escape($file.FullName)
+    $components += "<Component Id=`"$id`" Guid=`"*`"><File Id=`"File$id`" Source=`"$escaped`" KeyPath=`"yes`" /></Component>"
+    $references += "<ComponentRef Id=`"$id`" />"
+}
+$include = Join-Path $stage 'Payload.wxi'
+"<Include xmlns=`"http://wixtoolset.org/schemas/v4/wxs`">$($components -join '')</Include>" | Set-Content $include -Encoding utf8
+$groups = Join-Path $stage 'PayloadGroup.wxs'
+"<Wix xmlns=`"http://wixtoolset.org/schemas/v4/wxs`"><Fragment><ComponentGroup Id=`"PayloadComponents`">$($references -join '')</ComponentGroup></Fragment></Wix>" | Set-Content $groups -Encoding utf8
+foreach ($arch in @('x86','x64')) {
+    $folder = Join-Path $payload $arch; New-Item -ItemType Directory $folder -Force | Out-Null
+    $msiName = "ExcelNavigator-$Version-$arch.msi"; $msi = Join-Path $folder $msiName
+    $programFiles = if ($arch -eq 'x64') { 'ProgramFiles64Folder' } else { 'ProgramFilesFolder' }
+    & $Wix build (Join-Path $PSScriptRoot 'Product.wxs') $groups -arch $arch -d "MsiVersion=$($parsed.Major).$($parsed.Minor).$($parsed.Build)" -d "ProgramFiles=$programFiles" -d "PayloadInclude=$include" -o $msi
+    if ($LASTEXITCODE -ne 0) { throw "MSI build failed: $arch" }
+    & $MSBuild (Join-Path $PSScriptRoot 'Bootstrapper.proj') /t:Build "/p:MsiFile=$msiName" "/p:BootstrapOutput=$folder" "/p:BootstrapperPath=$BootstrapperPath" /nologo /verbosity:minimal
+    if ($LASTEXITCODE -ne 0 -or !(Test-Path (Join-Path $folder 'setup.exe'))) { throw 'Microsoft prerequisite bootstrapper failed.' }
+    Copy-Item $msi (Join-Path $dist $msiName)
+}
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$payload = Join-Path $stage 'payload.zip'
-[System.IO.Compression.ZipFile]::CreateFromDirectory($publish, $payload)
-Copy-Item $payload (Join-Path $dist "ExcelNavigator-Publish-$Version.zip")
-$exe = Join-Path $dist "ExcelNavigator-Setup-$Version.exe"
-$framework = Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319'
+$payloadZip = Join-Path $stage 'payload.zip'
+# Exclude WiX debugging metadata rather than distributing build paths.
+foreach ($arch in @('x86','x64')) {
+    $debug = Join-Path $payload "$arch\ExcelNavigator-$Version-$arch.wixpdb"
+    if (Test-Path -LiteralPath $debug) { Remove-Item -LiteralPath $debug }
+}
+[IO.Compression.ZipFile]::CreateFromDirectory($payload, $payloadZip)
 $versionSource = Join-Path $stage 'InstallerVersion.cs'
 "[assembly: System.Reflection.AssemblyVersion(`"$Version`")]`n[assembly: System.Reflection.AssemblyFileVersion(`"$Version`")]" | Set-Content $versionSource -Encoding utf8
-& (Join-Path $framework 'csc.exe') /nologo /target:winexe /platform:anycpu /optimize+ /r:System.Windows.Forms.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll "/resource:$payload,payload.zip" "/out:$exe" (Join-Path $PSScriptRoot 'SetupLauncher.cs') $versionSource
-if ($LASTEXITCODE -ne 0) { throw 'Single-file launcher compilation failed.' }
+$exe = Join-Path $dist "ExcelNavigator-Setup-$Version.exe"
+& "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe" /nologo /target:winexe /platform:anycpu /optimize+ /r:System.Windows.Forms.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll "/resource:$payloadZip,payload.zip" "/out:$exe" (Join-Path $PSScriptRoot 'SetupLauncher.cs') $versionSource
+if ($LASTEXITCODE -ne 0) { throw 'EXE launcher build failed.' }
 $signature = Set-AuthenticodeSignature -LiteralPath $exe -Certificate $certificate -HashAlgorithm SHA256
-if (!$signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $thumbprint) { throw 'Installer signing failed.' }
-
-# Execute only the extraction check, never install or alter Excel registration on the build machine.
+if ($signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) { throw 'EXE signature missing.' }
+$hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+"$hash  $([IO.Path]::GetFileName($exe))" | Set-Content ($exe + '.sha256') -Encoding ascii
+$fileKey = "releases/$Version/$([IO.Path]::GetFileName($exe))"
+$message = "ExcelNavigatorPane`n$Version`n$fileKey`n$hash"
+$release = [xml]::new(); $entry = $release.CreateElement('release')
+$entry.SetAttribute('product','ExcelNavigatorPane'); $entry.SetAttribute('version',$Version)
+$entry.SetAttribute('file',$fileKey); $entry.SetAttribute('sha256',$hash)
+$signed = $rsa.SignData([Text.Encoding]::UTF8.GetBytes($message), [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+$entry.SetAttribute('signature',[Convert]::ToBase64String($signed)); [void]$release.AppendChild($entry)
+$release.Save((Join-Path $dist 'latest.xml'))
+$rsa.ToXmlString($false) | Set-Content (Join-Path $dist 'update-public-key.xml') -Encoding utf8
+(Get-Content (Join-Path $PSScriptRoot '安装说明.txt') -Raw).Replace('{VERSION}',$Version) | Set-Content (Join-Path $dist '安装说明.txt') -Encoding utf8
 $check = Join-Path $stage 'extraction-check'
-$process = Start-Process -FilePath $exe -ArgumentList @('--extract-only', ('"' + $check + '"')) -WindowStyle Hidden -PassThru -Wait
-if ($process.ExitCode -ne 0) { throw 'Installer extraction check failed.' }
-foreach ($file in Get-ChildItem $publish -Recurse -File) {
-    $relative = $file.FullName.Substring($publish.Length + 1)
-    if ((Get-FileHash $file.FullName).Hash -ne (Get-FileHash (Join-Path $check $relative)).Hash) { throw "Payload mismatch: $relative" }
+$process = Start-Process $exe -ArgumentList @('--extract-only', ('"' + $check + '"')) -WindowStyle Hidden -PassThru -Wait
+if ($process.ExitCode -ne 0) { throw 'EXE extraction check failed.' }
+foreach ($file in Get-ChildItem $payload -Recurse -File) {
+    $relative = $file.FullName.Substring($payload.Length + 1)
+    if ((Get-FileHash $file.FullName).Hash -ne (Get-FileHash (Join-Path $check $relative)).Hash) { throw "EXE payload mismatch: $relative" }
 }
-$instructions = (Get-Content (Join-Path $PSScriptRoot '安装说明.txt') -Raw).Replace('{VERSION}', $Version)
-$updateNote = if ($manifestUrl) { "已配置启动时更新：$manifestUrl" } else { '本包尚未配置更新地址，自动更新未启用。' }
-$instructions.Replace('{UPDATE_STATUS}', $updateNote) | Set-Content (Join-Path $dist '安装说明.txt') -Encoding utf8
-$hash = Get-FileHash $exe -Algorithm SHA256
-"$($hash.Hash)  $([IO.Path]::GetFileName($exe))" | Set-Content ($exe + '.sha256') -Encoding ascii
-Write-Output "PASS: publish, signed EXE, extraction and all payload hashes. Installer: $exe"
-Write-Output "Certificate trust status on this machine: $($signature.Status). Clean-machine installation: NOT_RUN."
+Write-Output "PASS: x86/x64 MSI, signed update metadata, EXE extraction hashes. Output: $dist"
+Write-Output "Payload: $app. Certificate trust stores unchanged. Actual install/upgrade: NOT_RUN."

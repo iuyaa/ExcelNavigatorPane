@@ -1,4 +1,4 @@
-# ExcelNavigatorPane
+﻿# ExcelNavigatorPane
 
 ExcelNavigatorPane 是一个基于 VSTO、WinForms 与 Excel Interop 的 Excel 导航栏加载项。当前范围只覆盖 Kutools Navigation Pane 中的“工作簿和表”模块：浏览、切换和管理已打开的工作簿与工作表，不包含资源库、名称管理器、列导航或跨工作簿查找替换。
 
@@ -38,6 +38,7 @@ ExcelNavigatorPane 是一个基于 VSTO、WinForms 与 Excel Interop 的 Excel �
 - 显示工作表总数、可见数与隐藏数
 - 单击工作表名称切换工作表
 - 单击眼睛图标切换普通 Visible/Hidden 状态
+- 从列表取消单张表的隐藏后立即切换到该表；眼睛按钮与隐藏表右键菜单行为一致，批量取消隐藏不自动切表。
 - `xlSheetVeryHidden` 只显示状态，不由导航栏修改
 - 单击锁图标调用 Excel 原生保护/取消保护命令
 - 临时显示当前工作簿中全部普通 Hidden 工作表，再次点击优先按 `CodeName` 恢复；若 Excel 未提供 CodeName，则在该工作簿生命周期内按工作表 COM 身份恢复
@@ -51,6 +52,14 @@ ExcelNavigatorPane 是一个基于 VSTO、WinForms 与 Excel Interop 的 Excel �
 - 编辑期间保留缓存列表；切表成功后更新高亮，结束编辑后刷新实际状态，包括 Esc 返回原表的情况。
 - 原生标签缺失、禁用、归属不明确或窗口失效时，提示错误并停止；恢复仍属于本次点击的列表选择，保留未完成公式。不会发送 Enter/Esc、模拟点击原生标签或退回 COM 激活。
 - 保存、重命名、保护、隐藏、最近两表、右键命令、手动刷新与排序仍要求 Excel 已结束编辑且可执行命令。编辑时宿主可能直接屏蔽这些入口。
+
+## WPS 兼容修复（1.0.3.0）
+
+用户已确认本机 WPS 表格曾能自动加载此插件；1.0.3.0 修复 64 位 Excel 与 32 位 WPS 共存时新版注册缺失。用户反馈 WPS 切换与重复窗格问题初测已解决。本版针对该环境增加工作簿 COM 切换、同一主窗口复用导航栏和关闭后的清理；不同主窗口仍分别管理导航栏，Excel 的每窗口独立行为保留。
+
+WPS 就绪状态使用宿主的 Ready 属性，编辑或忙碌时拒绝切换；Excel 原有公式编辑导航不变。WPS 公式编辑导航尚未适配，真实 WPS/Excel 点击回归为 **NOT_RUN**。安装器按 Windows 位数选择 MSI；64 位 Windows 同时注册 32/64 位加载项，只有 WPS 的电脑安装尚未适配。升级前必须保存并关闭 Excel 与 WPS 表格。
+
+`tests/WpsCompatibilityCheck.cs` 使用测试进程自己的隐藏窗口和 COM 接口替身，覆盖窗格复用、创建重入、跨主窗口隔离、关闭后的清理、两种宿主取消隐藏的激活顺序，以及忙碌时禁止 COM 切换；已纳入 `tests/UpdatePublishCheck.ps1`。
 
 ## 行为边界
 
@@ -80,11 +89,12 @@ ExcelNavigatorPane 是一个基于 VSTO、WinForms 与 Excel Interop 的 Excel �
 ## 运行环境
 
 - Windows 和 Microsoft Excel 桌面版
-- 支持 VSTO 的 Visual Studio
-- .NET Framework 4.8 Developer Pack
+- .NET Framework 4.8
 - VSTO Runtime 与 Excel COM 组件
 
 ## 构建与调试
+
+开发机需要支持 VSTO 的 Visual Studio 与 .NET Framework 4.8 Developer Pack；安装包接收方不需要这些开发工具。
 
 可直接用 Visual Studio 打开：
 
@@ -99,56 +109,61 @@ ExcelNavigatorPane 是一个基于 VSTO、WinForms 与 Excel Interop 的 Excel �
 msbuild .\ExcelNavigatorPane.csproj /t:Rebuild /p:Configuration=Debug /p:Platform=AnyCPU
 ```
 
-### 内部试用安装包
+### EXE 安装包（内含 MSI）
 
-运行 `./installer/Build-Installer.ps1` 可发布 Release/ClickOnce 并生成 `dist/ExcelNavigator-Setup-1.0.0.2.exe`，接收方只需这个 EXE；同时生成可供上传的完整发布 ZIP。安装时保存并关闭 Excel，缺少 .NET Framework 4.8 或 VSTO Runtime 时联网安装依赖。详细步骤见生成目录中的 `安装说明.txt`。
+以下命令生成 `dist/releases/1.0.9.0/ExcelNavigator-Setup-1.0.9.0.exe`。用户只需一个 EXE，无需 Visual Studio。EXE 检查桌面 Excel 已安装后，按 Windows 位数选择内置 MSI；64 位包同时注册 32/64 位宿主，共享 AnyCPU 插件；缺少 .NET Framework 4.8 或 VSTO Runtime 时由微软引导程序下载依赖。
 
-脚本默认在当前用户证书库中创建或复用内部代码签名证书，不写入受信任根或受信任发布者，不更改项目的开发签名配置。正式证书可用 `-CertificateThumbprint` 指定，构建工具位置可用 `-MSBuild` 指定。输出目录 `dist/` 为生成物。
+```powershell
+# 一次性准备 WiX 构建工具；用户电脑不需要 WiX
+dotnet tool install wix --version 4.0.6 --tool-path work/tools/wix
+./installer/Build-Installer.ps1 -Version 1.0.9.0
+```
 
-单文件启动器将安装源解包到 `%LOCALAPPDATA%/ExcelNavigatorPane/Installer`，再启动微软生成的安装程序；插件安装和卸载由 VSTO/ClickOnce 处理。安装器面向 Windows 10/11，其他 Excel 版本及 x86 仍需实机验证。
+安装前保存工作并关闭所有 Excel 与 WPS 表格。MSI 需要管理员授权，将加载项安装到对应的 Program Files 目录，并写入 HKLM 加载项注册（64 位 Windows 同时写入 32/64 位视图），使用 `|vstolocal` 从本地加载。正常 Windows/VSTO 策略下，这条安装方式使用 Program Files 的信任机制，不需要用户导入自签名根证书。EXE 仍可能显示未知发布者或 Windows 安全提示，公司策略也可能限制安装。
 
-打包脚本会运行仅解包检查，逐文件比对发布内容的 SHA-256，不在开发机执行安装或修改 Excel 注册。当前已通过这些检查；无开发环境电脑上的安装、加载和卸载为 **NOT_RUN**。内部自签名证书可能触发发布者信任提示或被公司策略阻止，正式分发需使用组织认可的签名方案。
+从 1.0.0.2 及更早版本迁移时，先在“程序和功能”卸载旧 ClickOnce 版本，再运行新 EXE。开发机的 HKCU 开发版注册也会覆盖 HKLM 注册，必须先取消开发版注册；EXE 检测到旧注册会停止并说明原因，不自动删除注册或源文件。不要直接删除开发项目目录。其他 Windows 用户已有的 ClickOnce 注册需分别处理。
+
+MSI 版后续升级直接运行新版 EXE，Windows Installer 负责替换旧版；拒绝降级，升级失败时通过安装事务恢复旧版。控制面板中使用“Excel Navigator”卸载。安装源按版本保存在 `%LOCALAPPDATA%/ExcelNavigatorPane/Installer/版本号`，供修复使用，安装期间不要清理。
+
+脚本复用当前用户证书库中的现有发布证书；可显式传入 `-CertificateThumbprint`。更新签名的公钥已固定在已安装插件中，换用不同密钥会导致旧客户端拒绝新清单，不能隐式轮换。打包不导入 Root/TrustedPublisher，不修改开发签名配置；`BuildInstaller=true` 跳过 VSTO 默认的开发注册步骤。
 
 ### 更新功能
 
-- 工作簿右上角菜单提供“检查更新”，异步查询版本，最多等待 10 秒；“关于导航栏”显示当前发布版本。
-- 未配置更新地址时明确提示，且不发出网络请求。手动检查只读取清单版本，不下载或执行程序；网页、错误产品清单、非 HTTPS 地址和临时签名 URL 不作为更新来源。
-- 发布时传入 `-UpdateBaseUrl`（固定 HTTPS 目录），VSTO 清单启用每次加载时检查更新；安装程序从该在线地址安装，Office 后续也沿用这个源。插件不会在用户工作期间关闭或重启 Excel。手动发现新版后提示保存工作、关闭所有 Excel 窗口并重新打开。
-- 未传地址时，EXE 保持本地安装模式，自动更新关闭。不能把当前 OneView 首页当作文件更新源。
+- 工作簿菜单“检查更新”读取固定 HTTPS `latest.xml`，最多等待 10 秒；“关于导航栏”显示安装版本。
+- 清单包含版本、相对 EXE 路径、SHA-256 和 RSA-SHA256 签名。插件使用内置公钥验证签名，拒绝篡改、外站路径、非 HTTPS、重定向和错误产品。
+- 发现新版后询问是否下载，让用户选择保存位置；下载最长 2 分钟、最多 128 MiB。文件哈希通过后才替换目标文件，失败会清理临时文件并保留原文件。
+- 下载完成后由用户保存工作、关闭 Excel 与 WPS 表格、运行 EXE 升级。插件不自动执行安装包、不强制退出或重启 Excel；不在启动时自动检查。
+- 开发构建未配置更新地址时不发起网络请求。正式打包默认使用 `https://oneview.jiarui.net.cn/excel-navigation/`，可用 `-UpdateBaseUrl` 指定其他固定 HTTPS 目录。
+- 旧 ClickOnce 根入口和旧文件继续保留；本版不会通过旧 `.vsto` 入口迁移用户，需要首次手工安装 MSI 版。
+
+本地检查：
 
 ```powershell
-# 当前可生成未配置地址的包
-.\installer\Build-Installer.ps1 -Version 1.0.0.2
-
-# 生成带正式更新地址的发布包
-.\installer\Build-Installer.ps1 -Version 1.0.0.2 -UpdateBaseUrl 'https://oneview.jiarui.net.cn/excel-navigation/'
+./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.9.0 -Version 1.0.9.0
+python tests/RustFSPublishCheck.py
 ```
 
-发布后将 `ExcelNavigator-Publish-版本号.zip` 解压上传到配置目录：先上传 `Application Files` 中的新版本文件，最后覆盖根目录 `ExcelNavigatorPane.vsto`；保留旧版目录，不修改已签名的清单或程序集。每次发布递增版本号、沿用同一签名证书及固定地址。入口清单应避免长期缓存，并设置 `.vsto` 类型为 `application/x-ms-vsto`。
-
-旧的离线来源安装用户需要先安装一次带在线地址且版本号更高的包；已安装加载项的来源迁移仍需独立电脑验收，不保证仅替换 EXE 即完成迁移。
-
-更新检查的解析/地址校验见 `tests/UpdateCheck.cs`；发布 ZIP 中的版本、原生更新标记、签名存在及安装源检查见 `tests/UpdatePublishCheck.ps1`。这些检查不等于真实升级验收：从旧版安装 → 发布新版 → 重启 Excel 加载新版、断网启动及证书不受信任时的行为均为 **NOT_RUN**，待本版安装后在独立环境执行。
+这些检查只解包和读取 MSI 表/依赖注册，不执行安装。覆盖两种位数、Program Files/HKLM 注册、升级事务和降级条件、负载哈希、更新清单签名及篡改拒绝、发布顺序和冲突保护。无开发环境电脑上的首次安装、Excel 加载、真实升级/回滚/卸载为 **NOT_RUN**；真实 Excel 验证必须使用 `/x` 新建独立进程。
 
 ### 发布流程
 
-RustFS 发布脚本复用同一批构建产物，默认仅预览；验证通过后加 `--apply` 上传并逐文件校验匿名下载，最后更新入口清单。版本文件已存在但内容不同会拒绝覆盖：
+1.0.9.0 为内部预发布版本，完整真实升级验收尚未完成，普通修改不自动发布。用户要求“发布”时完成以下全部步骤，更新日志维护在 [CHANGELOG.md](CHANGELOG.md)：
+
+1. 确定递增版本号并整理更新日志，同步 `Properties/UpdateSettings.xml` 和 `Properties/AssemblyInfo.cs` 的 `AssemblyFileVersion`，避免 MSI 因 DLL 文件版本未增长而跳过替换。采用 `主.次.构建.0`，最后一段必须为 0；MSI 只比较前三段（最大分别为 255、255、65535）。下一版例如 1.0.10.0。
+2. 完成相关检查，提交源码与日志并推送 GitHub；排除凭据、私钥、生成物和无关本地修改。
+3. 从该提交构建安装包，显式指定版本、正式更新目录及沿用的发布证书。运行上述检查，创建并推送指向同一提交的 `v版本号` 标签。
+4. 创建 GitHub Release 草稿，附上 EXE、SHA-256、x86/x64 MSI、安装说明、`latest.xml` 和 `update-public-key.xml`。用户默认下载 EXE；MSI 供具备运行环境的 IT 部署使用，必须选择 Windows 对应位数，先关闭 Excel、卸载旧 ClickOnce。
+5. 复用同一批产物上传 RustFS：先上传并校验 `releases/版本号/` 内的七个文件，最后更新根 `latest.xml`。保留全部旧版本和旧 ClickOnce 对象，不进行删除同步；同版本内容不同会拒绝覆盖。发布端需要 boto3、python-dotenv、requests、cryptography。
+6. 验证用户 HTTPS 地址匿名下载、清单签名、版本和文件完整性，再发布 Release。未完成独立电脑安装和升级验收时使用预发布。报告提交、标签、Release 链接、下载地址和验证结果；失败说明已完成与待补步骤。
 
 ```powershell
-python installer/Publish-RustFS.py --version 1.0.0.2 --directory dist/releases/1.0.0.2
-python installer/Publish-RustFS.py --version 1.0.0.2 --directory dist/releases/1.0.0.2 --apply
+# 默认只检查本地产物并预览，不访问 RustFS
+python installer/Publish-RustFS.py --version 1.0.9.0 --directory dist/releases/1.0.9.0
+# 用户要求发布时执行，逐文件上传并校验匿名下载，入口最后更新
+python installer/Publish-RustFS.py --version 1.0.9.0 --directory dist/releases/1.0.9.0 --apply
 ```
 
-后续每次发布均包含以下步骤，更新日志统一维护在 [CHANGELOG.md](CHANGELOG.md)：
-
-1. 确定递增的四段版本号，将“未发布”内容整理为该版本和发布日期，写明用户可见变化、验证结果及已知限制。
-2. 完成相关构建和检查，提交本次发布源码与更新日志并推送 GitHub。排除凭据、私钥、生成物和无关本地修改。
-3. 从该提交构建安装包，显式指定版本、正式 `UpdateBaseUrl` 和沿用的签名证书；验证产物。创建指向该提交的 `v版本号` 标签并推送。
-4. 创建 GitHub Release 草稿，说明取自该版本更新日志；附上 EXE、EXE 的 SHA-256 文件、完整发布 ZIP 和安装说明。后续 RustFS 上传复用同一批产物。
-5. 将发布 ZIP 解压后的目录结构上传至 RustFS 的 `excel-navigation` 桶内固定更新目录。先上传新版本 `Application Files` 并校验下载内容，再上传根目录安装资源，最后覆盖 `ExcelNavigatorPane.vsto`。保留旧版目录，不使用删除同步。入口清单避免长期缓存；签名文件保持原样。
-6. 从用户使用的 HTTPS 地址验证匿名下载、清单版本及文件完整性，再发布 Release。首次接入先发布内部试用预发布版，明确未完成的实机验收；独立环境的安装及旧版升级验收通过后再发布稳定版。报告提交、标签、Release 链接、下载地址和实际验证结果。
-
-正式更新目录为 `https://oneview.jiarui.net.cn/excel-navigation/`，S3 Endpoint 为同域名根地址，凭据保存在 Git 忽略的本机 `.env`。2026-09-11 已通过真实上传、覆盖、签名/匿名下载及权限检查：`python tests/RustFSUploadCheck.py`（需本机已安装 boto3、python-dotenv、requests；每次仅新增一组小型诊断对象并保留）。详情见 [RustFS 接入说明](installer/RustFS接入说明.md)。1.0.0.2 为首个在线更新试用版；真实 Excel 升级验收尚未执行；任一步失败应保留已完成步骤的记录，修复后继续，不重复发布同版本的不同产物。
+正式更新目录为 `https://oneview.jiarui.net.cn/excel-navigation/`，S3 Endpoint 为同域名根地址，凭据保存在 Git 忽略的本机 `.env`。路由和上传账号已在 1.0.0.2 发布时验证；迁移不改变桶、账号或域名，新的入口在本版正式发布时上传。详情见 [RustFS 接入说明](installer/RustFS接入说明.md)。
 
 ## 手工验收清单
 
@@ -214,3 +229,13 @@ python installer/Publish-RustFS.py --version 1.0.0.2 --directory dist/releases/1
 - 工作簿重命名本质上是 Excel `SaveAs`，覆盖确认、格式兼容和路径长度错误由 Excel 处理
 - “关于导航栏”显示打包时的发布版本；本地开发构建默认不启用自动更新
 - 当前只实现“工作簿和表”模块，不承诺与 Kutools 其他模块或视觉资产兼容
+
+1.0.4.0 更新请求使用独立的 TLS 1.2 设置，不修改 Excel/WPS 全局网络配置。线上 latest.xml 返回 404 时明确提示更新清单尚未提供。已通过独立 .NET 进程的旧 TLS 默认值实网回归（tests/UpdateTransportCheck.cs）；真实安装升级和完整下载新版流程仍待验收。
+
+1.0.5.0 导航栏工作表名称前显示 Sheet 标签原色的小色条；无色不显示，白色/浅色保留边框，活动行绿色标记独立保留。标签颜色在列表刷新或切换时同步，手动改色后可点击工作表区刷新按钮。颜色读取失败不会阻止导航。颜色转换及选中/悬停/隐藏行渲染检查通过（280/320/400 宽度），Excel/WPS 实机颜色验证 NOT_RUN。
+
+1.0.6.0 安装器只阻止与 HKLM 安装路径冲突的用户级注册；指向同一本地清单的注册允许升级。日志位于 %LOCALAPPDATA%\ExcelNavigatorPane\Installer\logs，记录当前 EXE 版本/路径及检查时的两种注册视图。使用 EXE 的 --check-only 参数仅检查注册并写日志，不安装或更改注册表。反复旧注册提示的启动瞬间原因仍待日志确认，不能以事后注册为空声称问题已解决。
+
+1.0.7.0 根据安装日志确认开发注册指向 bin/Debug。安装器对本插件 bin/Debug 或 bin/Release 本地注册提供显式确认迁移：保存注册值、类型及子键到 HKCU\Software\ExcelNavigatorPane\RegistrationBackups 后移除原开发注册，源文件不变。其他注册冲突保持拦截。--check-only 只读。隔离注册表子树回归通过；真实迁移安装尚待用户验证。
+
+1.0.8.0：工作表搜索框有内容时显示清除按钮，清空关键词后保留隐藏表筛选并将焦点留在搜索框。工作簿空白区/标题区右键显示新建、打开、排序、刷新、检查更新、关于；右键具体工作簿再显示保存、重命名、关闭，操作绑定点中的工作簿，右键本身不激活工作簿。三个点入口保留并复用同一菜单，支持菜单键及 Shift+F10。离线目标绑定/空白/空列表/入口共用回归、筛选和三宽度渲染通过；真实 Excel/WPS 点击验证 NOT_RUN。

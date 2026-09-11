@@ -1,0 +1,12 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Prerequisite Include=".NETFramework,Version=v4.8"><Install>true</Install></Prerequisite>
+    <Prerequisite Include="Microsoft.VSTORuntime.4.0"><Install>true</Install></Prerequisite>
+  </ItemGroup>
+  <Target Name="Build">
+    <GenerateBootstrapper ApplicationFile="$(MsiFile)" ApplicationName="Excel Navigator"
+        BootstrapperItems="@(Prerequisite)" ComponentsLocation="HomeSite" CopyComponents="false"
+        Culture="zh-Hans" FallbackCulture="en" OutputPath="$(BootstrapOutput)"
+        Path="$(BootstrapperPath)" />
+  </Target>
+</Project>
