@@ -73,6 +73,14 @@ namespace ExcelNavigatorPane
         private bool _nativeNavigationInput;
         private SynchronizationContext _uiContext;
         private System.Windows.Forms.Timer _editRefreshTimer;
+        private System.Windows.Forms.Timer _updateTimer;
+        private LinkLabel _updateLink;
+        private Panel _updateFooter;
+        private ToolStripMenuItem _checkUpdates;
+        private UpdateChecker.UpdateInfo _availableUpdate;
+        private bool _checkingUpdate;
+        private bool _showUpdateWhenReady;
+        private bool _downloadingUpdate;
 
         private sealed class PaneSynchronizationContext : SynchronizationContext
         {
@@ -243,6 +251,13 @@ namespace ExcelNavigatorPane
 
             SeedSheetHistory();
             RefreshAll();
+            _updateTimer = new System.Windows.Forms.Timer { Interval = 15000 };
+            _updateTimer.Tick += (sender, args) =>
+            {
+                _updateTimer.Interval = 60000;
+                CheckUpdates(false);
+            };
+            _updateTimer.Start();
         }
 
         internal void UpdateContext(Excel.Window window, Excel.Workbook workbook)
@@ -506,39 +521,10 @@ namespace ExcelNavigatorPane
             _btnWbSortZA = new ToolStripMenuItem("名称降序 Z–A");
             var sortMenu = new ToolStripMenuItem("排序");
             sortMenu.DropDownItems.AddRange(new ToolStripItem[] { _btnWbSortAZ, _btnWbSortZA });
-            var help = new ToolStripMenuItem("关于导航栏");
-            var checkUpdates = new ToolStripMenuItem("检查更新") { ToolTipText = "检查新版本；不会关闭 Excel 或中断当前工作" };
-            checkUpdates.Click += async (sender, args) =>
-            {
-                if (!IsReadyForCommands()) return;
-                checkUpdates.Enabled = false;
-                checkUpdates.Text = "正在检查更新…";
-                UpdateChecker.UpdateInfo result;
-                try
-                {
-                    result = await UpdateChecker.CheckAsync().ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    LogDebug("检查更新失败。", ex);
-                    result = new UpdateChecker.UpdateInfo { Message = "无法检查更新，请稍后重试。" };
-                }
-                if (IsDisposed) return;
-                _uiContext.Post(_ =>
-                {
-                    checkUpdates.ToolTipText = result.Message;
-                    checkUpdates.Enabled = true;
-                    checkUpdates.Text = "检查更新";
-                    if (IsReadyForCommands())
-                    {
-                        if (result.DownloadUrl == null) ShowInformation(result.Message);
-                        else if (MessageBox.Show(this, result.Message, "Excel Navigator", MessageBoxButtons.YesNo,
-                            MessageBoxIcon.Information) == DialogResult.Yes) DownloadUpdate(result, checkUpdates);
-                    }
-                    else checkUpdates.Text = "更新检查完成（悬停查看）";
-                }, null);
-            };
-            _workbookContextMenu.Items.AddRange(new ToolStripItem[] { new ToolStripSeparator(), sortMenu, checkUpdates, help });
+            var help = new ToolStripMenuItem("功能说明");
+            _checkUpdates = new ToolStripMenuItem("检查更新") { ToolTipText = "后台检查新版本，点击更新提示查看变化" };
+            _checkUpdates.Click += (sender, args) => CheckUpdates(true);
+            _workbookContextMenu.Items.AddRange(new ToolStripItem[] { new ToolStripSeparator(), sortMenu, _checkUpdates, help });
             var newWorkbook = new ToolStripButton { Image = CreateToolbarIcon("add"), DisplayStyle = ToolStripItemDisplayStyle.Image,
                 ToolTipText = "新建工作簿", AccessibleName = "新建工作簿", Alignment = ToolStripItemAlignment.Right };
             newWorkbook.Click += (sender, args) => NewWorkbook();
@@ -690,7 +676,24 @@ namespace ExcelNavigatorPane
             mainPanel.Controls.Add(_workbookSplitter);
             mainPanel.Controls.Add(_workbookPanel);
             mainPanel.SizeChanged += (sender, args) => UpdateWorkbookLayout();
+            _updateFooter = new Panel { Dock = DockStyle.Bottom, Height = 32, BackColor = ColorSidebar,
+                Padding = new Padding(8, 0, 8, 0) };
+            var guideLink = new LinkLabel { Text = "功能说明", Dock = DockStyle.Right, Width = 72,
+                TextAlign = ContentAlignment.MiddleRight, LinkColor = ColorTextSub, ActiveLinkColor = ColorTextMain,
+                LinkBehavior = LinkBehavior.HoverUnderline, AccessibleName = "查看功能说明" };
+            _updateLink = new LinkLabel { Text = "v" + UpdateChecker.CurrentVersion, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, LinkColor = ColorTextSub,
+                ActiveLinkColor = ColorTextMain, LinkBehavior = LinkBehavior.HoverUnderline, AccessibleName = "版本与更新" };
+            _updateLink.LinkClicked += (sender, args) =>
+            {
+                if (_availableUpdate == null) CheckUpdates(true);
+                else ShowUpdateDetails(_availableUpdate);
+            };
+            guideLink.LinkClicked += (sender, args) => ShowFeatureGuide();
+            _updateFooter.Controls.Add(_updateLink);
+            _updateFooter.Controls.Add(guideLink);
             this.Controls.Add(mainPanel);
+            this.Controls.Add(_updateFooter);
 
             _btnWbSortAZ.Click += (sender, args) => RunUserAction(
                 "无法排序工作簿",
@@ -713,15 +716,149 @@ namespace ExcelNavigatorPane
                 _btnClearFilter.Available = _txtFilter.Text.Length > 0;
                 RefreshWorksheets();
             };
-            help.Click += (sender, args) => ShowInformation(
-                "Excel Navigator " + UpdateChecker.CurrentVersion + "\n工作簿和表导航模块");
+            help.Click += (sender, args) => ShowFeatureGuide();
 
             InitializeContextMenus();
         }
 
-        private async void DownloadUpdate(UpdateChecker.UpdateInfo release, ToolStripMenuItem button)
+        private async void CheckUpdates(bool manual)
+        {
+            if (_downloadingUpdate || IsDisposed || _uiContext == null) return;
+            if (manual && !IsReadyForCommands()) return;
+            if (manual)
+            {
+                _showUpdateWhenReady = true;
+                _checkUpdates.Enabled = false;
+                _checkUpdates.Text = "正在检查更新…";
+            }
+            if (_checkingUpdate) return;
+            _checkingUpdate = true;
+            UpdateChecker.UpdateInfo result;
+            try { result = await UpdateChecker.CheckSharedAsync(manual).ConfigureAwait(false); }
+            catch (Exception ex)
+            {
+                LogDebug("检查更新失败。", ex);
+                result = new UpdateChecker.UpdateInfo { Message = "无法检查更新，请稍后重试。" };
+            }
+            if (IsDisposed) return;
+            _uiContext.Post(_ =>
+            {
+                _checkingUpdate = false;
+                if (IsDisposed) return;
+                // A transient automatic failure must not hide an already discovered update.
+                if (result.DownloadUrl != null) _availableUpdate = result;
+                RefreshUpdateStatus();
+                bool showDetails = _showUpdateWhenReady;
+                _showUpdateWhenReady = false;
+                if (showDetails && IsReadyForCommands())
+                {
+                    if (result.DownloadUrl != null) ShowUpdateDetails(result);
+                    else ShowInformation(result.Message);
+                }
+            }, null);
+        }
+
+        private void RefreshUpdateStatus()
+        {
+            bool downloading = UpdateChecker.DownloadInProgress;
+            _updateLink.Enabled = _checkUpdates.Enabled = !downloading;
+            _checkUpdates.Text = downloading ? "正在下载安装包…" : "检查更新";
+            _updateLink.Text = downloading ? "正在下载安装包…" : _availableUpdate == null
+                ? "v" + UpdateChecker.CurrentVersion : "● 新版本 v" + _availableUpdate.Version + " · 查看更新";
+            _updateLink.LinkColor = _availableUpdate == null ? ColorTextSub : ColorExcelGreen;
+            _workbookToolTip.SetToolTip(_updateLink, _availableUpdate == null
+                ? "当前版本：" + UpdateChecker.CurrentVersion + "；点击检查更新"
+                : "当前版本：" + UpdateChecker.CurrentVersion + "；点击查看 v" + _availableUpdate.Version + " 的更新内容");
+        }
+
+        private void ShowUpdateDetails(UpdateChecker.UpdateInfo release)
+        {
+            if (!IsReadyForCommands() || UpdateChecker.DownloadInProgress) return;
+            using (var dialog = new InformationDialog("更新详情", "当前 v" + UpdateChecker.CurrentVersion + "  →  新版 v" + release.Version,
+                release.ReleaseNotes ?? "此版本暂未提供更新说明。", true))
+            {
+                if (dialog.ShowDialog(this) == DialogResult.OK) DownloadUpdate(release, _checkUpdates);
+            }
+        }
+
+        private void ShowFeatureGuide()
         {
             if (!IsReadyForCommands()) return;
+            using (var dialog = new InformationDialog("功能说明", "Excel Navigator · v" + UpdateChecker.CurrentVersion,
+                "工作簿\r\n" +
+                "• 切换：点击工作簿名称。\r\n" +
+                "• 新建、打开、保存、关闭：使用行内按钮或工作簿区域右键菜单。\r\n" +
+                "• 重命名：右键工作簿选择重命名，保留原格式；当前通过另存新名实现，旧文件仍保留，云端文件暂不支持。\r\n" +
+                "• 复制文件：点击关闭按钮前的复制图标，保存修改并复制原文件，可粘贴到支持文件的聊天或邮件客户端。OneDrive 文件被占用时，需关闭并等待保存完成。\r\n" +
+                "• 排序：在右键菜单选择名称升序或降序，再次点击恢复默认。\r\n\r\n" +
+                "工作表\r\n" +
+                "• 搜索：输入名称筛选，点击清除按钮恢复列表。\r\n" +
+                "• 标签颜色：列表体现工作表原有标签色。\r\n" +
+                "• 仅看可见表 / 查看全部表：只改变列表范围，不改变工作表隐藏状态。\r\n" +
+                "• 眼睛按钮：隐藏或取消隐藏单张表；取消隐藏后自动切换过去。\r\n" +
+                "• 取消隐藏 / 恢复隐藏：临时显示普通隐藏表，再恢复原状态。深度隐藏表不修改。\r\n" +
+                "• 锁图标：调用宿主的工作表保护或取消保护命令。\r\n" +
+                "• 最近两表：在最近使用的两张工作表之间往返。\r\n\r\n" +
+                "布局与使用提示\r\n" +
+                "• 拖动分隔线调整工作簿区高度，双击恢复自动高度。\r\n" +
+                "• 工作簿区域空白处也可右键打开菜单。\r\n" +
+                "• WPS 编辑或忙碌时暂不支持导航切换；Excel 的公式编辑导航受原生窗口和标签可用性限制。\r\n" +
+                "• 后台每六小时检查更新，有新版时在底部提示；点击查看更新内容，确认后才下载。", false))
+                dialog.ShowDialog(this);
+        }
+
+        private sealed class InformationDialog : Form
+        {
+            internal InformationDialog(string title, string heading, string content, bool update)
+            {
+                Text = "Excel Navigator · " + title;
+                Font = new Font("Microsoft YaHei UI", 9f);
+                ClientSize = new Size(600, 500);
+                MinimumSize = new Size(480, 360);
+                StartPosition = FormStartPosition.CenterParent;
+                ShowInTaskbar = false;
+                MinimizeBox = false;
+                BackColor = ColorBg;
+                var header = new Label { Text = heading, Dock = DockStyle.Top, Height = 52,
+                    TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(18, 0, 18, 0) };
+                var body = new TextBox { Text = content.Replace("\r\n", "\n").Replace("\n", "\r\n"), Dock = DockStyle.Fill, ReadOnly = true,
+                    Multiline = true, BorderStyle = BorderStyle.None, BackColor = ColorBg,
+                    ForeColor = ColorTextMain, ScrollBars = ScrollBars.Vertical, AccessibleName = title + "内容" };
+                var bodyPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(18, 0, 18, 8) };
+                bodyPanel.Controls.Add(body);
+                var actions = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 48,
+                    FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(10, 6, 10, 6) };
+                var close = new Button { Text = update ? "稍后再说" : "关闭", DialogResult = DialogResult.Cancel,
+                    Width = 98, Height = 30 };
+                actions.Controls.Add(close);
+                if (update)
+                {
+                    actions.Controls.Add(new Button { Text = "下载并安装", DialogResult = DialogResult.OK, Width = 112, Height = 30 });
+                    var hint = new Label { Text = "安装前请保存工作并关闭 Excel / WPS。", Dock = DockStyle.Bottom,
+                        Height = 28, Padding = new Padding(18, 0, 0, 0), ForeColor = ColorTextSub };
+                    Controls.Add(bodyPanel);
+                    Controls.Add(hint);
+                }
+                else Controls.Add(bodyPanel);
+                Controls.Add(header);
+                Controls.Add(actions);
+                AcceptButton = close;
+                CancelButton = close;
+                Shown += (sender, args) => { body.Select(0, 0); body.ScrollToCaret(); close.Focus(); };
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing) Font.Dispose();
+                base.Dispose(disposing);
+            }
+        }
+
+        private async void DownloadUpdate(UpdateChecker.UpdateInfo release, ToolStripMenuItem button)
+        {
+            if (!IsReadyForCommands() || !UpdateChecker.TryBeginDownload()) return;
+            _downloadingUpdate = true;
+            RefreshUpdateStatus();
             button.Enabled = false;
             button.Text = "正在下载安装包…";
             string message;
@@ -747,9 +884,12 @@ namespace ExcelNavigatorPane
                 }
             }
             catch (Exception ex) { LogDebug("下载安装包失败。", ex); message = "下载未完成，原有文件保持不变，请稍后重试。"; }
+            finally { UpdateChecker.EndDownload(); }
             if (IsDisposed) return;
             _uiContext.Post(_ =>
             {
+                _downloadingUpdate = false;
+                RefreshUpdateStatus();
                 button.Enabled = true;
                 button.ToolTipText = message;
                 button.Text = "检查更新";
@@ -801,7 +941,7 @@ namespace ExcelNavigatorPane
             int worksheetMinimum = worksheetPanel.Padding.Vertical + 3 * _lbWorksheets.ItemHeight;
             foreach (Control child in worksheetPanel.Controls)
                 if (child.Dock == DockStyle.Top || child.Dock == DockStyle.Bottom) worksheetMinimum += child.Height;
-            int available = Math.Max(0, ClientSize.Height - _workbookSplitter.Height);
+            int available = Math.Max(0, ClientSize.Height - _workbookSplitter.Height - (_updateFooter?.Height ?? 0));
             int maximum = Math.Max(0, available - worksheetMinimum);
             minimum = Math.Min(minimum, maximum);
             int desired = _manualWorkbookHeight ?? (header + Math.Max(5, _lbWorkbooks.Items.Count) * _lbWorkbooks.ItemHeight);
@@ -2133,6 +2273,7 @@ namespace ExcelNavigatorPane
             {
                 if (_mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(_mouseHook); _mouseHook = IntPtr.Zero; }
                 _editRefreshTimer?.Dispose();
+                _updateTimer?.Dispose();
                 _workbookToolTip.Dispose();
                 foreach (Image image in _toolbarImages) image.Dispose();
                 _toolbarImages.Clear();

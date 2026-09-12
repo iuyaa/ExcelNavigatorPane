@@ -15,6 +15,8 @@ class UpdateChannelLiveCheck
             ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls;
             var release = UpdateChecker.CheckAsync().GetAwaiter().GetResult();
             if (release.Version == null || release.Version.ToString() != args[0]) throw new Exception(release.Message);
+            if (args.Length > 3 && (release.ReleaseNotes == null || !release.ReleaseNotes.Contains(args[3])))
+                throw new Exception("Expected signed release notes missing");
             UpdateChecker.DownloadAsync(release, args[1]).GetAwaiter().GetResult();
             using (var sha = SHA256.Create())
             {
@@ -26,6 +28,7 @@ class UpdateChannelLiveCheck
             if (ServicePointManager.SecurityProtocol != SecurityProtocolType.Tls) throw new Exception("Global TLS changed");
             Console.WriteLine("PASS: " + UpdateChecker.ReadSettings().Attribute("channel") + "; " + release.DownloadUrl +
                 "; live discovery, signature, download/hash, legacy TLS. Actual install NOT_RUN.");
+            if (args.Length > 3) Console.WriteLine("PASS: signed release notes include " + args[3]);
             return 0;
         }
         catch (Exception ex) { Console.WriteLine(ex); return 1; }

@@ -31,6 +31,70 @@ namespace ExcelNavigatorPane
             internal string Sha256;
             internal string Message;
             internal bool GitHub;
+            internal string ReleaseNotes;
+        }
+
+        private static readonly object CheckLock = new object();
+        private static Task<UpdateInfo> _sharedCheck;
+        private static DateTime _checkedAt;
+        private static int _downloading;
+        internal static bool DownloadInProgress => Volatile.Read(ref _downloading) != 0;
+        internal static bool TryBeginDownload() => Interlocked.CompareExchange(ref _downloading, 1, 0) == 0;
+        internal static void EndDownload() { Interlocked.Exchange(ref _downloading, 0); }
+
+        internal static Task<UpdateInfo> CheckSharedAsync(bool force)
+        {
+            lock (CheckLock)
+            {
+                if (_sharedCheck == null || (_sharedCheck.IsCompleted && (force || DateTime.UtcNow - _checkedAt >= TimeSpan.FromHours(6))))
+                {
+                    _checkedAt = DateTime.UtcNow;
+                    _sharedCheck = Task.Run(CheckAsync);
+                }
+                return _sharedCheck;
+            }
+        }
+
+        internal static string ChangesSince(string notes, Version current, Version latest)
+        {
+            var text = new StringBuilder();
+            bool include = false;
+            foreach (string line in notes.Replace("\r\n", "\n").Split('\n'))
+            {
+                if (line.StartsWith("## ", StringComparison.Ordinal))
+                {
+                    var match = Regex.Match(line, @"^## (\d+\.\d+\.\d+\.0)(?:\s|$)");
+                    Version version;
+                    include = match.Success && Version.TryParse(match.Groups[1].Value, out version) && version > current && version <= latest;
+                    if (include) text.AppendLine(line.Substring(3));
+                }
+                else if (include) text.AppendLine(line.StartsWith("### ") ? line.Substring(4) : line);
+            }
+            string result = text.ToString().Trim();
+            return result.Length == 0 ? "此版本暂未提供更新说明。" : result;
+        }
+
+        private static string ReadReleaseNotes(XElement root, string publicKey)
+        {
+            string notes = (string)root.Attribute("notes");
+            if (string.IsNullOrEmpty(notes)) return "此版本暂未提供更新说明。";
+            try
+            {
+                if (notes.Length > 256 * 1024) throw new InvalidDataException("更新说明过长。");
+                using (RSA rsa = RSA.Create())
+                {
+                    rsa.FromXmlString(publicKey);
+                    byte[] message = Encoding.UTF8.GetBytes("ExcelNavigatorPane notes\n" + (string)root.Attribute("version") + "\n" + notes);
+                    if (!rsa.VerifyData(message, Convert.FromBase64String((string)root.Attribute("notesSignature") ?? ""),
+                        HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)) throw new InvalidDataException("更新说明签名无效。");
+                }
+                return ChangesSince(new UTF8Encoding(false, true).GetString(Convert.FromBase64String(notes)),
+                    CurrentVersion, Version.Parse((string)root.Attribute("version")));
+            }
+            catch (Exception ex) when (ex is FormatException || ex is CryptographicException || ex is ArgumentException || ex is InvalidDataException)
+            {
+                return "更新说明无法验证，暂不展示。安装包仍会单独校验。";
+            }
         }
 
         internal static XElement ReadSettings()
@@ -134,7 +198,8 @@ namespace ExcelNavigatorPane
             }
             catch (Exception ex) when (ex is FormatException || ex is CryptographicException || ex is ArgumentException)
             { throw new InvalidDataException("无法验证更新清单签名。", ex); }
-            return new UpdateInfo { Version = version, DownloadUrl = new Uri(address, file), Sha256 = hash };
+            return new UpdateInfo { Version = version, DownloadUrl = new Uri(address, file), Sha256 = hash,
+                ReleaseNotes = ReadReleaseNotes(root, publicKey) };
         }
 
         internal static async Task<UpdateInfo> CheckAsync()

@@ -2,6 +2,7 @@
 // csc /r:System.Windows.Forms.dll /out:WpsCompatibilityCheck.exe tests\WpsCompatibilityCheck.cs
 // WpsCompatibilityCheck.exe <built ExcelNavigatorPane.dll>
 using System;
+using System.Drawing;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -15,6 +16,8 @@ using System.Windows.Forms;
 
 class WpsCompatibilityCheck
 {
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hwnd,int index);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int SetWindowLong(IntPtr hwnd,int index,int value);
     const BindingFlags F = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
     class Stub : RealProxy
     {
@@ -35,6 +38,84 @@ class WpsCompatibilityCheck
     }
     static void Set(object target,string field,object value) { target.GetType().GetField(field,F).SetValue(target,value); }
     static void Require(bool ok,string reason) { if(!ok) throw new Exception(reason); }
+    static void CheckUpdateUi(Type controlType)
+    {
+        using(var pane = (Control)Activator.CreateInstance(controlType))
+        {
+            var link = (LinkLabel)controlType.GetField("_updateLink",F).GetValue(pane);
+            var footer = (Panel)controlType.GetField("_updateFooter",F).GetValue(pane);
+            Require(link.Text.StartsWith("v"),"Footer must show installed version");
+            var infoType = controlType.Assembly.GetType("ExcelNavigatorPane.UpdateChecker+UpdateInfo");
+            object info = Activator.CreateInstance(infoType,true);
+            infoType.GetField("Version",F).SetValue(info,new Version(1,0,99,0));
+            Set(pane,"_availableUpdate",info);
+            Call(pane,"RefreshUpdateStatus");
+            Require(link.Text.Contains("1.0.99.0") && link.Text.Contains("查看更新"),"New release needs inline notice");
+            foreach(int width in new[]{240,280,340})
+            {
+                pane.Size = new Size(width,600); pane.PerformLayout(); footer.PerformLayout();
+                var guide = footer.Controls.Cast<Control>().Single(c => c.Text=="功能说明");
+                Require(link.Width>80 && link.Right<=guide.Left,"Footer links must not overlap at narrow widths");
+            }
+            Require(controlType.GetField("_updateTimer",F).GetValue(pane)==null,"Uninitialized preview must never start background requests");
+            // Feed completed results into the shared cache: exercise the real asynchronous UI path without network or Office.
+            var checker = controlType.Assembly.GetType("ExcelNavigatorPane.UpdateChecker");
+            var shared = checker.GetField("_sharedCheck",F);
+            var checkedAt = checker.GetField("_checkedAt",F);
+            object oldTask=shared.GetValue(null), oldTime=checkedAt.GetValue(null);
+            try
+            {
+                IntPtr handle=pane.Handle;
+                var contextType=controlType.GetNestedType("PaneSynchronizationContext",BindingFlags.NonPublic);
+                Set(pane,"_uiContext",Activator.CreateInstance(contextType,F,null,new object[]{pane},null));
+                foreach(bool available in new[]{false,true})
+                {
+                    object result=Activator.CreateInstance(infoType,true);
+                    if(available)
+                    {
+                        infoType.GetField("Version",F).SetValue(result,new Version(1,0,100,0));
+                        infoType.GetField("DownloadUrl",F).SetValue(result,new Uri("https://example.invalid/never-download.exe"));
+                    }
+                    else infoType.GetField("Message",F).SetValue(result,"offline failure");
+                    var completed=typeof(Task).GetMethod("FromResult").MakeGenericMethod(infoType).Invoke(null,new[]{result});
+                    shared.SetValue(null,completed); checkedAt.SetValue(null,DateTime.UtcNow);
+                    int forms=Application.OpenForms.Count;
+                    Call(pane,"CheckUpdates",false);
+                    for(int i=0;i<100 && (bool)controlType.GetField("_checkingUpdate",F).GetValue(pane);i++)
+                    { Application.DoEvents(); System.Threading.Thread.Sleep(5); }
+                    Require(!(bool)controlType.GetField("_checkingUpdate",F).GetValue(pane),"Background UI callback must complete");
+                    Require(Application.OpenForms.Count==forms,"Automatic result must never open a dialog");
+                    Require(link.Text.Contains(available ? "1.0.100.0" : "1.0.99.0"),"Failure must preserve notice; success must update it");
+                }
+            }
+            finally { shared.SetValue(null,oldTask); checkedAt.SetValue(null,oldTime); }
+        }
+        var dialogType = controlType.GetNestedType("InformationDialog",BindingFlags.NonPublic);
+        using(var dialog = (Form)Activator.CreateInstance(dialogType,F,null,new object[]{"更新详情","当前 v1.0.14.0 → 新版 v1.0.15.0",
+            "1.0.15.0\r\n\r\n新增功能\r\n• 导航栏更新提示\r\n• 离线功能说明\r\n\r\n问题修复\r\n• 更新说明支持跨版本查看",true},null))
+        {
+            Require(((Button)dialog.AcceptButton).DialogResult==DialogResult.Cancel,"Enter must not silently start installation");
+            dialog.CreateControl(); dialog.PerformLayout();
+            var body = dialog.Controls.Cast<Control>().SelectMany(c => c.Controls.Cast<Control>()).OfType<TextBox>().Single();
+            Require(body.ReadOnly && body.Multiline,"Release notes must be inert, readable text");
+            var actions = dialog.Controls.OfType<FlowLayoutPanel>().Single();
+            Require(actions.Controls.OfType<Button>().Count(b => b.DialogResult==DialogResult.OK)==1,"Download requires explicit confirmation");
+            dialog.ClientSize = new Size(480,360); dialog.PerformLayout();
+            Require(body.Height>120 && body.Width>300,"Resized details must remain readable");
+            string preview = Environment.GetEnvironmentVariable("EXCEL_NAVIGATOR_TEST_PREVIEW");
+            if(!string.IsNullOrEmpty(preview))
+            {
+                dialog.ClientSize = new Size(600,500); dialog.PerformLayout();
+                // Render only this test window offscreen, with native activation disabled.
+                dialog.StartPosition = FormStartPosition.Manual; dialog.Location = new Point(-30000,-30000);
+                SetWindowLong(dialog.Handle,-20,GetWindowLong(dialog.Handle,-20) | 0x08000000);
+                dialog.Show(); Application.DoEvents();
+                using(var bitmap=new Bitmap(dialog.Width,dialog.Height)) { dialog.DrawToBitmap(bitmap,new Rectangle(0,0,dialog.Width,dialog.Height)); bitmap.Save(preview); }
+                dialog.Hide();
+            }
+        }
+        Console.WriteLine("PASS: inline version/update state, narrow footer layout, safe update-dialog default and inert notes (offline)");
+    }
     static void CheckWorkbookCopy(Type controlType)
     {
         Type bookType=controlType.GetField("_workbook",F).FieldType;
@@ -187,6 +268,7 @@ class WpsCompatibilityCheck
             var addinType = assembly.GetType("ExcelNavigatorPane.ThisAddIn");
             var controlType = assembly.GetType("ExcelNavigatorPane.NavigationPaneControl");
             CheckWorkbookCopy(controlType);
+            CheckUpdateUi(controlType);
             CheckWorksheetRefresh(controlType,addinType);
             var rename = controlType.GetMethod("GetRenamedWorkbookName", F);
             foreach (var sample in new[] {
@@ -306,7 +388,7 @@ class WpsCompatibilityCheck
                 Call(control,"LbWorkbooks_MouseClick",workbookList,new MouseEventArgs(MouseButtons.Right,1,4,workbookList.GetItemRectangle(1).Bottom+5,0));
                 Require(menuOpenings == 2 && controlType.GetField("_workbookMenuTarget",F).GetValue(control)==null,"Blank area must open a targetless menu");
                 foreach(string label in new[]{"保存","重命名...","复制文件","关闭"}) Require(!menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank area must hide target-specific actions");
-                foreach(string label in new[]{"新建","打开...","排序","刷新列表","检查更新","关于导航栏"}) Require(menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank menu missing common action: "+label);
+                foreach(string label in new[]{"新建","打开...","排序","刷新列表","检查更新","功能说明"}) Require(menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank menu missing common action: "+label);
                 var headingStrip = (ToolStrip)controlType.GetField("_wbToolStrip",F).GetValue(control);
                 headingStrip.Items.Cast<ToolStripItem>().Single(i=>i.AccessibleName=="工作簿操作").PerformClick();
                 Require(menuOpenings==3 && ReferenceEquals(controlType.GetField("_workbookMenuTarget",F).GetValue(control),otherBook),"Three-dot entry must reuse the menu with its selected workbook");

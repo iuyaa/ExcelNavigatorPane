@@ -48,6 +48,14 @@ def verify_release(manifest, public_key):
     message = '\n'.join(root.attrib[name] for name in ('product', 'version', 'file', 'sha256'))
     public.verify(base64.b64decode(root.get('signature', ''), validate=True), message.encode(),
                   padding.PKCS1v15(), hashes.SHA256())
+    notes = root.get('notes')
+    if notes is not None:
+        if len(notes) > 256 * 1024:
+            raise ValueError('Release notes exceed limit')
+        note_message = 'ExcelNavigatorPane notes\n' + root.get('version') + '\n' + notes
+        public.verify(base64.b64decode(root.get('notesSignature', ''), validate=True), note_message.encode(),
+                      padding.PKCS1v15(), hashes.SHA256())
+        base64.b64decode(notes, validate=True).decode('utf-8')
     return root
 
 

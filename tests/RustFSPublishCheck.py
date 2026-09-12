@@ -64,6 +64,18 @@ def main():
     manifest = ET.tostring(root)
     newer = manifest.replace(b'1.0.1.0', b'1.0.2.0')
     publisher.verify_release(manifest, public)
+    notes = base64.b64encode('## 1.0.1.0\n### 新增功能\n- 功能说明'.encode()).decode()
+    root.set('notes', notes)
+    root.set('notesSignature', base64.b64encode(key.sign(
+        ('ExcelNavigatorPane notes\n1.0.1.0\n' + notes).encode(), padding.PKCS1v15(), hashes.SHA256())).decode())
+    manifest = ET.tostring(root)
+    publisher.verify_release(manifest, public)
+    from cryptography.exceptions import InvalidSignature
+    try:
+        publisher.verify_release(manifest.replace(notes.encode(), b'dGFtcGVyZWQ='), public)
+        raise AssertionError('Tampered release notes accepted')
+    except InvalidSignature:
+        pass
     with tempfile.TemporaryDirectory() as temp:
         path = Path(temp)
         for filename, data in {name: installer, name + '.sha256': (digest + '  ' + name).encode(),

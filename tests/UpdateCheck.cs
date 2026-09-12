@@ -58,6 +58,59 @@ class UpdateCheck
                 Reject(() => UpdateChecker.GetResponseAsync(client, address, true).GetAwaiter().GetResult());
     }
     static void Require(bool value) { if (!value) throw new Exception("Check failed"); }
+    static void CheckUpdateExperience()
+    {
+        const BindingFlags fields = BindingFlags.Static | BindingFlags.NonPublic;
+        var shared = typeof(UpdateChecker).GetField("_sharedCheck", fields);
+        var checkedAt = typeof(UpdateChecker).GetField("_checkedAt", fields);
+        var pending = new TaskCompletionSource<UpdateChecker.UpdateInfo>();
+        shared.SetValue(null, pending.Task);
+        checkedAt.SetValue(null, DateTime.UtcNow.AddHours(-7));
+        Require(ReferenceEquals(UpdateChecker.CheckSharedAsync(false), pending.Task));
+        Require(ReferenceEquals(UpdateChecker.CheckSharedAsync(true), pending.Task));
+        pending.SetResult(new UpdateChecker.UpdateInfo());
+        var renewed = UpdateChecker.CheckSharedAsync(false);
+        Require(!ReferenceEquals(renewed, pending.Task));
+        renewed.GetAwaiter().GetResult(); // development configuration: no network
+        Require(ReferenceEquals(renewed, UpdateChecker.CheckSharedAsync(false)));
+        var forced = UpdateChecker.CheckSharedAsync(true);
+        Require(!ReferenceEquals(forced, renewed));
+        forced.GetAwaiter().GetResult();
+        shared.SetValue(null, null);
+        Require(UpdateChecker.TryBeginDownload());
+        Require(!UpdateChecker.TryBeginDownload() && UpdateChecker.DownloadInProgress);
+        UpdateChecker.EndDownload();
+        Require(!UpdateChecker.DownloadInProgress);
+
+        string notes = "## 未发布\nfuture\n## 1.0.17.0\nfuture17\n## 1.0.16.0 — date\n### 新增功能\n- 新功能\n" +
+            "## 1.0.15.0\n### 问题修复\n- 修复滚动\n## 1.0.14.0\nold14\n";
+        string changes = UpdateChecker.ChangesSince(notes, new Version(1,0,14,0), new Version(1,0,16,0));
+        Require(changes.Contains("新功能") && changes.Contains("修复滚动") && !changes.Contains("future") && !changes.Contains("old14"));
+        Require(UpdateChecker.ChangesSince(notes, new Version(1,0,16,0), new Version(1,0,16,0)).Contains("暂未提供"));
+        using (var rsa = RSA.Create())
+        {
+            string latest = new Version(UpdateChecker.CurrentVersion.Major, UpdateChecker.CurrentVersion.Minor,
+                UpdateChecker.CurrentVersion.Build + 1, 0).ToString();
+            var root = new XElement("release", new XAttribute("product", "ExcelNavigatorPane"), new XAttribute("version", latest),
+                new XAttribute("file", "releases/" + latest + "/ExcelNavigator-Setup-" + latest + ".exe"), new XAttribute("sha256", new string('0',64)));
+            string message = "ExcelNavigatorPane\n" + latest + "\n" + root.Attribute("file").Value + "\n" + root.Attribute("sha256").Value;
+            root.SetAttributeValue("signature", Convert.ToBase64String(rsa.SignData(Encoding.UTF8.GetBytes(message), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)));
+            var address = new Uri("https://example.invalid/latest.xml");
+            string key = rsa.ToXmlString(false);
+            Require(UpdateChecker.ReadRelease(root.ToString(), address, key).ReleaseNotes.Contains("暂未提供"));
+            string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes("## " + latest + "\n### 问题修复\n- 测试修复"));
+            root.SetAttributeValue("notes", encoded);
+            root.SetAttributeValue("notesSignature", Convert.ToBase64String(rsa.SignData(Encoding.UTF8.GetBytes("ExcelNavigatorPane notes\n" + latest + "\n" + encoded), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1)));
+            Require(UpdateChecker.ReadRelease(root.ToString(), address, key).ReleaseNotes.Contains("测试修复"));
+            foreach (string bad in new[] { "!", new string('x', 256 * 1024 + 1), Convert.ToBase64String(Encoding.UTF8.GetBytes("tampered")) })
+            {
+                root.SetAttributeValue("notes", bad);
+                var result = UpdateChecker.ReadRelease(root.ToString(), address, key);
+                Require(result.ReleaseNotes.Contains("无法验证") && result.Version.ToString() == latest);
+            }
+        }
+        Console.WriteLine("PASS: shared checks, six-hour cache, manual retry, download exclusion, cross-version notes, signed notes and legacy fallback");
+    }
     static void Reject(Action action)
     {
         try { action(); }
@@ -103,6 +156,7 @@ class UpdateCheck
         {
             int officeChecks = 0, prompts = 0;
             CheckChannels();
+            CheckUpdateExperience();
             SetupLauncher.WaitForOfficeClosed(() => ++officeChecks <= 2,
                 () => { prompts++; return System.Windows.Forms.DialogResult.Retry; });
             Require(officeChecks == 3 && prompts == 2);

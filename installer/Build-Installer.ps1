@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.0.14.0',
+    [string]$Version = '1.0.15.0',
     [ValidateSet('oneview','github')][string]$UpdateChannel = 'oneview',
     [string]$ChannelsFile = (Join-Path $PSScriptRoot 'UpdateChannels.json'),
     [string]$UpdateBaseUrl,
@@ -17,6 +17,23 @@ $parsed = [version]$Version
 if ($parsed.ToString() -ne $Version) { throw 'Version fields must not contain leading zeros.' }
 if ($parsed.Major -gt 255 -or $parsed.Minor -gt 255 -or $parsed.Build -gt 65535 -or $parsed -lt [version]'1.0.1.0') { throw 'Version exceeds MSI limits or predates MSI migration.' }
 $repo = Split-Path $PSScriptRoot -Parent
+# Keep release notes in the existing manifest attributes so older clients still accept it.
+$history = [Text.StringBuilder]::new()
+$include = $false; $foundVersion = $false
+foreach ($line in [IO.File]::ReadAllLines((Join-Path $repo 'CHANGELOG.md'))) {
+    if ($line.StartsWith('## ')) {
+        $include = $false
+        if ($line -match '^## (\d+\.\d+\.\d+\.0)(?:\s|$)') {
+            $noteVersion = [version]$Matches[1]
+            $include = $noteVersion -le $parsed
+            if ($noteVersion -eq $parsed) { $foundVersion = $true }
+        }
+    }
+    if ($include) { [void]$history.Append($line).Append("`n") }
+}
+if (!$foundVersion) { throw 'CHANGELOG.md must contain the release version.' }
+$notes = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($history.ToString().Trim()))
+if ($notes.Length -gt 256 * 1024) { throw 'Release notes exceed manifest size limit; archive old changelog entries.' }
 if (!$Wix) { $Wix = Join-Path $repo 'work\tools\wix\wix.exe' }
 if (!(Test-Path $Wix)) { throw 'Install build tool: dotnet tool install wix --version 4.0.6 --tool-path work/tools/wix' }
 $channels = Get-Content -LiteralPath $ChannelsFile -Raw | ConvertFrom-Json
@@ -115,6 +132,10 @@ $entry.SetAttribute('product','ExcelNavigatorPane'); $entry.SetAttribute('versio
 $entry.SetAttribute('file',$fileKey); $entry.SetAttribute('sha256',$hash)
 $signed = $rsa.SignData([Text.Encoding]::UTF8.GetBytes($message), [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
 $entry.SetAttribute('signature',[Convert]::ToBase64String($signed)); [void]$release.AppendChild($entry)
+$entry.SetAttribute('notes', $notes)
+$noteMessage = "ExcelNavigatorPane notes`n$Version`n$notes"
+$noteSignature = $rsa.SignData([Text.Encoding]::UTF8.GetBytes($noteMessage), [Security.Cryptography.HashAlgorithmName]::SHA256, [Security.Cryptography.RSASignaturePadding]::Pkcs1)
+$entry.SetAttribute('notesSignature', [Convert]::ToBase64String($noteSignature))
 $release.Save((Join-Path $dist 'latest.xml'))
 $rsa.ToXmlString($false) | Set-Content (Join-Path $dist 'update-public-key.xml') -Encoding utf8
 (Get-Content (Join-Path $PSScriptRoot '安装说明.txt') -Raw).Replace('{VERSION}',$Version).Replace('{CHANNEL}',$UpdateChannel) | Set-Content (Join-Path $dist '安装说明.txt') -Encoding utf8
