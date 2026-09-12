@@ -193,6 +193,113 @@ class WpsCompatibilityCheck
         } finally { File.Delete(file); Directory.Delete(folder); }
         Console.WriteLine("PASS: save then copy actual path, canceled/failed save rejection, OneDrive URL mapping and boundaries, no temporary copies; clipboard untouched");
     }
+    static void CheckWorksheetDrag(Type controlType)
+    {
+        Type bookType=controlType.GetField("_workbook",F).FieldType, appType=controlType.GetField("_app",F).FieldType;
+        Type windowType=controlType.GetField("_window",F).FieldType;
+        var move=controlType.GetMethod("MoveWorksheet",F); Type sheetType=move.GetParameters()[0].ParameterType;
+        Type sheetsType=bookType.GetInterfaces().Concat(new[]{bookType}).SelectMany(t=>t.GetProperties()).First(p=>p.Name=="Worksheets").PropertyType;
+        Type barsType=appType.GetInterfaces().Concat(new[]{appType}).SelectMany(t=>t.GetProperties()).First(p=>p.Name=="CommandBars").PropertyType;
+        var sheets=new ArrayList(); var visibility=Enumerable.Repeat(-1,40).ToArray(); visibility[1]=0; visibility[2]=2;
+        bool ready=true, protect=false, events=true, screen=true; int mode=0, moves=0, writes=0;
+        object active=null, book=null;
+        object collection=Proxy(sheetsType,c=>c.MethodName=="GetEnumerator" ? sheets.GetEnumerator() : (object)sheets.Count);
+        book=Proxy(bookType,c=>c.MethodName=="get_Worksheets" ? collection : c.MethodName=="get_ProtectStructure" ? (object)protect : null);
+        object bars=Proxy(barsType,c=>true);
+        object app=Proxy(appType,c=> {
+            if(c.MethodName=="get_Ready") return ready;
+            if(c.MethodName=="get_CommandBars") return bars;
+            if(c.MethodName=="get_EnableEvents") return events;
+            if(c.MethodName=="get_ScreenUpdating") return screen;
+            if(c.MethodName=="set_EnableEvents") { events=(bool)c.Args[0]; return null; }
+            if(c.MethodName=="set_ScreenUpdating") { screen=(bool)c.Args[0]; return null; }
+            throw new Exception("Unexpected drag app call: "+c.MethodName);
+        });
+        for(int i=0;i<40;i++) {
+            int id=i; object sheet=null;
+            sheet=Proxy(sheetType,c=> {
+                if(c.MethodName=="Equals") return ReferenceEquals(sheet,c.Args[0]);
+                if(c.MethodName=="GetType") return sheetType;
+                if(c.MethodName=="get_Parent") return book;
+                if(c.MethodName=="get_Name" || c.MethodName=="get_CodeName") return "Sheet"+id;
+                if(c.MethodName=="get_Index") return sheets.IndexOf(sheet)+1;
+                if(c.MethodName=="get_Visible") return Enum.ToObject(((MethodInfo)c.MethodBase).ReturnType,visibility[id]);
+                if(c.MethodName=="set_Visible") { writes++; visibility[id]=Convert.ToInt32(c.Args[0]); return null; }
+                if(c.MethodName=="get_ProtectContents") return false;
+                if(c.MethodName=="get_Tab") return null;
+                if(c.MethodName=="Activate") { active=sheet; return null; }
+                if(c.MethodName=="Move") {
+                    Require(!events && !screen,"Move must suppress intermediate UI/events"); moves++;
+                    if(mode==1) throw new IOException("Move failed");
+                    if(mode==2) return null; // WPS-style silent refusal
+                    bool after=sheetType.IsInstanceOfType(c.Args[1]); object target=after ? c.Args[1] : c.Args[0];
+                    sheets.Remove(sheet); sheets.Insert(sheets.IndexOf(target)+(after?1:0),sheet);
+                    if(visibility[id]==-1) active=sheet; // host can activate a moved visible sheet
+                    return null;
+                }
+                throw new Exception("Unexpected drag sheet call: "+c.MethodName);
+            }); sheets.Add(sheet);
+        }
+        object original=sheets[0], hidden=sheets[1], deep=sheets[2], visible=sheets[3], targetSheet=sheets[8]; active=original;
+        object window=Proxy(windowType,c=>c.MethodName=="get_ActiveSheet" ? active : null);
+        using(var control=(Control)Activator.CreateInstance(controlType)) {
+            Set(control,"_app",app); Set(control,"_workbook",book); Set(control,"_window",window);
+            Action<object,object,bool> reorder=(a,b,after)=>Call(control,"MoveWorksheet",a,b,after);
+            reorder(hidden,targetSheet,true);
+            Require(sheets.IndexOf(hidden)==sheets.IndexOf(targetSheet)+1 && visibility[1]==0 && writes==0 && active==original,"Hidden move preserves state without temporary unhide");
+            reorder(visible,hidden,true); Require(active==original && events && screen,"Visible move restores active sheet and flags");
+            int count=moves; reorder(visible,hidden,true); reorder(hidden,hidden,false); Require(moves==count,"Same/adjacent placement is a no-op");
+            Action<Action> reject=action=> { try { action(); throw new Exception("Unsafe move accepted"); } catch(InvalidOperationException) {} };
+            protect=true; reject(()=>reorder(hidden,original,false)); protect=false;
+            ready=false; reject(()=>reorder(hidden,original,false)); ready=true;
+            reject(()=>reorder(deep,original,false));
+            var foreign=Proxy(sheetType,c=>c.MethodName=="get_Parent" ? Proxy(bookType,x=>null) : null);
+            reject(()=>reorder(foreign,original,false)); reject(()=>reorder(hidden,foreign,false));
+            Require(moves==count,"Busy/protected/deep/foreign guards must precede Move");
+            mode=1; try { reorder(hidden,original,false); throw new Exception("Move exception swallowed"); } catch(IOException) {}
+            Require(events && screen && active==original,"Failed move restores flags and active sheet");
+            mode=2; reject(()=>reorder(hidden,original,false)); Require(events && screen,"Silent ignored move must be detected"); mode=0;
+            events=false; screen=false; reorder(hidden,original,false); Require(!events && !screen,"Restore original false flags, not forced true"); events=true; screen=true;
+            control.Size=new Size(320,650); IntPtr handle=control.Handle; control.PerformLayout();
+            var list=(ListBox)controlType.GetField("_lbWorksheets",F).GetValue(control); handle=list.Handle;
+            Call(control,"RefreshWorksheets",true); list.TopIndex=0;
+            var source=list.Items[0]; Set(control,"_sheetDragSource",source); Set(control,"_sheetDragWorkbook",book); Set(control,"_draggingSheet",true);
+            var row=list.GetItemRectangle(4);
+            Call(control,"UpdateSheetDropTarget",new Point(40,row.Top+2),false);
+            Require(controlType.GetField("_sheetDropTarget",F).GetValue(control)==list.Items[4] && !(bool)controlType.GetField("_sheetDropAfter",F).GetValue(control),"Upper row targets Before");
+            Call(control,"UpdateSheetDropTarget",new Point(40,row.Bottom-2),false);
+            Require((bool)controlType.GetField("_sheetDropAfter",F).GetValue(control),"Lower row targets After");
+            Call(control,"UpdateSheetDropTarget",new Point(40,list.ClientSize.Height-2),true);
+            Require(list.TopIndex>0,"Edge drag scrolls down");
+            Call(control,"UpdateSheetDropTarget",new Point(-4,20),false);
+            Require(controlType.GetField("_sheetDropTarget",F).GetValue(control)==null,"Outside list cancels marker");
+            var escape=new QueryContinueDragEventArgs(1,true,DragAction.Continue); Call(list,"OnQueryContinueDrag",escape); Require(escape.Action==DragAction.Cancel,"Esc cancels drag");
+            Set(control,"_workbook",Proxy(bookType,c=>null));
+            var switched=new QueryContinueDragEventArgs(1,false,DragAction.Continue); Call(list,"OnQueryContinueDrag",switched);
+            Require(switched.Action==DragAction.Cancel,"Changing workbook cancels drag"); Set(control,"_workbook",book);
+            var invalid=new DragEventArgs(new DataObject("foreign"),1,0,0,DragDropEffects.Move,DragDropEffects.Move);
+            Call(control,"WorksheetDragOver",list,invalid); Require(invalid.Effect==DragDropEffects.None,"Foreign drag rejected");
+            Set(control,"_draggingSheet",false); list.TopIndex=0;
+            Call(control,"WorksheetDragMouseDown",list,new MouseEventArgs(MouseButtons.Left,1,list.ClientSize.Width-42,5,0));
+            Require(controlType.GetField("_sheetDragSource",F).GetValue(control)==null,"Eye button is not draggable");
+            int clicks=0; list.MouseClick+=(o,e)=>clicks++;
+            list.GetType().GetProperty("SuppressClick").SetValue(list,true,null); Call(list,"OnMouseClick",new MouseEventArgs(MouseButtons.Left,1,40,5,0));
+            Require(clicks==0,"Drag release must not also navigate"); Call(list,"BeginNativeClick");
+            Require(!(bool)list.GetType().GetProperty("SuppressClick").GetValue(list,null),"Next native edit click must not remain suppressed");
+            // Filtered drop uses real target identity; rows omitted by search keep relative order.
+            var filter=(ToolStripTextBox)controlType.GetField("_txtFilter",F).GetValue(control); filter.Text="Sheet1";
+            object filteredSource=list.Items[0], filteredTarget=list.Items[list.Items.Count-1];
+            var itemType=filteredSource.GetType(); object dragged=itemType.GetProperty("Worksheet").GetValue(filteredSource,null);
+            object[] others=sheets.Cast<object>().Where(x=>x!=dragged).ToArray();
+            Set(control,"_sheetDragSource",filteredSource); Set(control,"_sheetDragWorkbook",book); Set(control,"_draggingSheet",true);
+            list.TopIndex=list.Items.Count-1;
+            var last=list.GetItemRectangle(list.Items.Count-1); Point pt=list.PointToScreen(new Point(40,last.Bottom-2));
+            var drop=new DragEventArgs(new DataObject(filteredSource),1,pt.X,pt.Y,DragDropEffects.Move,DragDropEffects.None);
+            Call(control,"WorksheetDragDrop",list,drop);
+            Require(drop.Effect==DragDropEffects.Move && others.SequenceEqual(sheets.Cast<object>().Where(x=>x!=dragged)),"Filtered drop moves only source and refreshes list");
+        }
+        Console.WriteLine("PASS: sheet drag targets/scroll/cancel/click isolation, hidden and visible moves, filtered drop, protection/busy/foreign/deep guards, ignored move and failure cleanup (offline)");
+    }
     static void CheckWorksheetRefresh(Type controlType, Type addinType)
     {
         Type appType = controlType.GetField("_app",F).FieldType;
@@ -274,6 +381,68 @@ class WpsCompatibilityCheck
         }
         Console.WriteLine("PASS: worksheet scroll preservation, unhide activation, repeated refresh, offscreen activation, removal/filter/book-switch boundaries; wide resizable rename dialog (offline)");
     }
+    static void CheckWorkbookRename(Type controlType)
+    {
+        var rename = controlType.GetMethod("RenameWorkbookFile", F);
+        Type bookType = controlType.GetField("_workbook", F).FieldType;
+        string folder = Path.Combine(Path.GetTempPath(), "ExcelNavigator-rename-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        string old = Path.Combine(folder, "原名.xlsx"), target = Path.Combine(folder, "新名.v2.xlsx");
+        const string root = "https://example.sharepoint.com/Documents/";
+        var mappings = new[] { new KeyValuePair<string,string>(root,folder) };
+        try
+        {
+            foreach(string mode in new[]{"local", "cloud", "cancel", "dirty", "missing", "empty", "throw", "exists", "readonly", "unmapped", "locked-old"})
+            {
+                File.WriteAllText(old,"original"); if(File.Exists(target)) File.Delete(target);
+                bool cloud = mode=="cloud" || mode=="unmapped", saved=true;
+                string full = cloud ? root+Uri.EscapeDataString(Path.GetFileName(old)) : old;
+                if(mode=="unmapped") full="https://other.invalid/原名.xlsx";
+                int saves=0;
+                object book=Proxy(bookType,c => {
+                    switch(c.MethodName) {
+                        case "get_ReadOnly": return mode=="readonly";
+                        case "get_FullName": return full;
+                        case "get_Saved": return saved;
+                        case "get_FileFormat": return Enum.ToObject(((MethodInfo)c.MethodBase).ReturnType,51);
+                        case "SaveAs":
+                            saves++; Require((string)c.Args[0]==target,"SaveAs must receive local target, never HTTPS");
+                            Require(Convert.ToInt32(c.Args[1])==51,"File format preserved");
+                            if(mode=="throw") throw new IOException("save failed");
+                            if(mode=="cancel") return null;
+                            full=cloud ? root+Uri.EscapeDataString(Path.GetFileName(target)) : target;
+                            saved=mode!="dirty";
+                            if(mode!="missing") File.WriteAllText(target,mode=="empty" ? "" : "latest edits");
+                            return null;
+                        default: throw new Exception("Unexpected rename call: "+c.MethodName);
+                    }
+                });
+                if(mode=="exists") File.WriteAllText(target,"do not overwrite");
+                using(var locked=mode=="locked-old" ? File.Open(old,FileMode.Open,FileAccess.Read,FileShare.Read) : null)
+                {
+                    string warning=null; Exception failure=null;
+                    try { warning=(string)rename.Invoke(null,new object[]{book,Path.GetFileName(target),mappings}); }
+                    catch(TargetInvocationException ex) { failure=ex.InnerException; }
+                    bool success=mode=="local" || mode=="cloud" || mode=="locked-old";
+                    Require(success ? failure==null : failure!=null,"Rename outcome: "+mode);
+                    Require(File.Exists(old)==(mode!="local" && mode!="cloud"),"Original deletion guard: "+mode);
+                    if(success) Require(File.ReadAllText(target)=="latest edits","Renamed content must include current changes");
+                    if(mode=="locked-old") Require(warning!=null && warning.Contains(old) && warning.Contains(target),"Partial success must identify both files");
+                    if(mode=="exists") Require(File.ReadAllText(target)=="do not overwrite","Existing target must survive");
+                    if(mode=="exists" || mode=="readonly" || mode=="unmapped") Require(saves==0,"Reject before SaveAs: "+mode);
+                    foreach(string invalid in new[]{"../bad.xlsx","CON.xlsx","LPT1.xlsx","bad.xlsx.","bad.xlsx "})
+                    {
+                        int before=saves;
+                        try { rename.Invoke(null,new object[]{book,invalid,mappings}); throw new Exception("Invalid name accepted"); }
+                        catch(TargetInvocationException ex) { Require(ex.InnerException is ArgumentException,"Invalid name must fail before file operations"); }
+                        Require(saves==before,"Invalid name called SaveAs");
+                    }
+                }
+            }
+        }
+        finally { Directory.Delete(folder,true); }
+        Console.WriteLine("PASS: local/OneDrive rename, current content, preserved format, cancel/failure/read-only/missing-file guards, no overwrite, old-file cleanup and locked-file warning (offline)");
+    }
     [STAThread]
     static int Main(string[] args)
     {
@@ -283,6 +452,8 @@ class WpsCompatibilityCheck
             var addinType = assembly.GetType("ExcelNavigatorPane.ThisAddIn");
             var controlType = assembly.GetType("ExcelNavigatorPane.NavigationPaneControl");
             CheckWorkbookCopy(controlType);
+            CheckWorkbookRename(controlType);
+            CheckWorksheetDrag(controlType);
             CheckUpdateUi(controlType);
             CheckWorksheetRefresh(controlType,addinType);
             var rename = controlType.GetMethod("GetRenamedWorkbookName", F);

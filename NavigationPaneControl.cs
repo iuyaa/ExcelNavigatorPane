@@ -81,6 +81,13 @@ namespace ExcelNavigatorPane
         private bool _checkingUpdate;
         private bool _showUpdateWhenReady;
         private bool _downloadingUpdate;
+        private WsItem _sheetDragSource;
+        private WsItem _sheetDropTarget;
+        private Excel.Workbook _sheetDragWorkbook;
+        private Point _sheetDragStart;
+        private bool _draggingSheet;
+        private bool _sheetDropAfter;
+        private System.Windows.Forms.Timer _sheetScrollTimer;
 
         private sealed class PaneSynchronizationContext : SynchronizationContext
         {
@@ -98,14 +105,16 @@ namespace ExcelNavigatorPane
         private sealed class NavigationListBox : ListBox
         {
             public object SelectionBeforeClick { get; private set; }
-            public void BeginNativeClick() { SelectionBeforeClick = SelectedItem; }
+            public bool SuppressClick { get; set; }
+            public void BeginNativeClick() { SelectionBeforeClick = SelectedItem; SuppressClick = false; }
             public void EndNativeClick(MouseEventArgs e) { OnMouseClick(e); }
+            protected override void OnMouseClick(MouseEventArgs e) { if (!SuppressClick) base.OnMouseClick(e); }
 
             protected override void WndProc(ref Message message)
             {
                 // Native ListBox selection changes before MouseDown/MouseClick are raised.
                 if (message.Msg == 0x0201 || message.Msg == 0x0204)
-                    SelectionBeforeClick = SelectedItem;
+                    BeginNativeClick();
                 base.WndProc(ref message);
             }
         }
@@ -376,6 +385,7 @@ namespace ExcelNavigatorPane
         public void RefreshWorksheets(bool reportErrors = false)
         {
             if (_app == null || _workbook == null || _lbWorksheets.IsDisposed) return;
+            if (_draggingSheet) return; // Keep drag identities stable until drop/cancel; refresh afterwards.
 
             bool updating = false;
             try
@@ -625,6 +635,17 @@ namespace ExcelNavigatorPane
                 BackColor = ColorBg
             };
             _lbWorksheets.DrawItem += LbWorksheets_DrawItem;
+            _lbWorksheets.AllowDrop = true;
+            _lbWorksheets.MouseDown += WorksheetDragMouseDown;
+            _lbWorksheets.MouseUp += (sender, args) => { if (!_draggingSheet) _sheetDragSource = null; };
+            _lbWorksheets.DragEnter += WorksheetDragOver;
+            _lbWorksheets.DragOver += WorksheetDragOver;
+            _lbWorksheets.DragLeave += (sender, args) => ClearSheetDropTarget();
+            _lbWorksheets.DragDrop += WorksheetDragDrop;
+            _lbWorksheets.QueryContinueDrag += (sender, args) =>
+            {
+                if (args.EscapePressed || !IsSameWorkbook(_sheetDragWorkbook, _workbook)) args.Action = DragAction.Cancel;
+            };
             _lbWorksheets.MouseMove += LbWorksheets_MouseMove;
             _lbWorksheets.MouseLeave += LbWorksheets_MouseLeave;
             _lbWorksheets.MouseClick += (sender, e) =>
@@ -790,10 +811,11 @@ namespace ExcelNavigatorPane
                 "工作簿\r\n" +
                 "• 切换：点击工作簿名称。\r\n" +
                 "• 新建、打开、保存、关闭：使用行内按钮或工作簿区域右键菜单。\r\n" +
-                "• 重命名：右键工作簿选择重命名，保留原格式；当前通过另存新名实现，旧文件仍保留，云端文件暂不支持。\r\n" +
+                "• 重命名：右键工作簿选择重命名，保留原格式；验证新文件保存成功后删除旧文件。支持已同步到本机的 OneDrive 文件，不覆盖同名文件；云端同步由 OneDrive 完成。\r\n" +
                 "• 复制文件：点击关闭按钮前的复制图标，保存修改并复制原文件，可粘贴到支持文件的聊天或邮件客户端。OneDrive 文件被占用时，需关闭并等待保存完成。\r\n" +
                 "• 排序：在右键菜单选择名称升序或降序，再次点击恢复默认。\r\n\r\n" +
                 "工作表\r\n" +
+                "• 拖动排序：按住工作表名称，按插入线放到目标前后；普通隐藏表保持隐藏，深度隐藏表不移动。编辑中或结构受保护时不可移动。\r\n" +
                 "• 搜索：输入名称筛选，点击清除按钮恢复列表。\r\n" +
                 "• 标签颜色：列表体现工作表原有标签色。\r\n" +
                 "• 仅看可见表 / 查看全部表：只改变列表范围，不改变工作表隐藏状态。\r\n" +
@@ -1214,6 +1236,12 @@ namespace ExcelNavigatorPane
                 lockRect,
                 item.IsProtected ? "lock" : "unlock",
                 lockRect.Contains(_mouseLocWs));
+            if (ReferenceEquals(item, _sheetDropTarget))
+                using (var pen = new Pen(ColorExcelGreen, 2))
+                {
+                    int y = _sheetDropAfter ? e.Bounds.Bottom - 2 : e.Bounds.Top + 1;
+                    e.Graphics.DrawLine(pen, 4, y, e.Bounds.Right - 4, y);
+                }
         }
 
         private static Color? DecodeTabColor(object colorIndex, object color)
@@ -1309,6 +1337,7 @@ namespace ExcelNavigatorPane
 
         private void LbWorksheets_MouseMove(object sender, MouseEventArgs e)
         {
+            if (TryStartWorksheetDrag(e)) return;
             int previousIndex = _hoveredWsIndex;
             int index = _lbWorksheets.IndexFromPoint(e.Location);
             bool eyeHovered = false;
@@ -1340,6 +1369,165 @@ namespace ExcelNavigatorPane
             _hoveredWsEye = false;
             _hoveredWsLock = false;
             _lbWorksheets.Invalidate();
+        }
+
+        private void WorksheetDragMouseDown(object sender, MouseEventArgs e)
+        {
+            _sheetDragSource = null;
+            if (e.Button != MouseButtons.Left) return;
+            int index = _lbWorksheets.IndexFromPoint(e.Location);
+            if (index < 0) return;
+            Rectangle bounds = _lbWorksheets.GetItemRectangle(index);
+            if (GetWsEyeRect(bounds).Contains(e.Location) || GetWsLockRect(bounds).Contains(e.Location)) return;
+            var item = (WsItem)_lbWorksheets.Items[index];
+            if (item.Visibility == Excel.XlSheetVisibility.xlSheetVeryHidden) return;
+            _sheetDragSource = item;
+            _sheetDragStart = e.Location;
+            _sheetDragWorkbook = _workbook;
+        }
+
+        private bool TryStartWorksheetDrag(MouseEventArgs e)
+        {
+            if (_draggingSheet || _sheetDragSource == null || e.Button != MouseButtons.Left) return false;
+            Size distance = SystemInformation.DragSize;
+            if (new Rectangle(_sheetDragStart.X - distance.Width / 2, _sheetDragStart.Y - distance.Height / 2,
+                distance.Width, distance.Height).Contains(e.Location)) return false;
+            // Suppress the release-click even when a drag is rejected, so it cannot activate or unhide a sheet.
+            _lbWorksheets.SuppressClick = true;
+            try
+            {
+                EnsureReady();
+                if (!IsSameWorkbook(_sheetDragWorkbook, _workbook) || _workbook.ProtectStructure)
+                    throw new InvalidOperationException("工作簿已切换或结构受保护，无法调整顺序。");
+                _draggingSheet = true;
+                if (_sheetScrollTimer == null)
+                {
+                    _sheetScrollTimer = new System.Windows.Forms.Timer { Interval = 120 };
+                    _sheetScrollTimer.Tick += (sender, args) => UpdateSheetDropTarget(_lbWorksheets.PointToClient(Cursor.Position), true);
+                }
+                _sheetScrollTimer.Start();
+                _lbWorksheets.DoDragDrop(_sheetDragSource, DragDropEffects.Move);
+            }
+            catch (Exception ex) { LogDebug("无法拖动工作表。", ex); ShowInformation(ex.Message); }
+            finally
+            {
+                _sheetScrollTimer?.Stop();
+                _draggingSheet = false;
+                _sheetDragSource = null;
+                _sheetDragWorkbook = null;
+                ClearSheetDropTarget();
+                if (!IsDisposed) RefreshWorksheets();
+            }
+            return true;
+        }
+
+        private bool IsOwnSheetDrag(DragEventArgs e)
+        {
+            return _draggingSheet && IsSameWorkbook(_sheetDragWorkbook, _workbook) && _sheetDragSource != null &&
+                e.Data != null && ReferenceEquals(e.Data.GetData(typeof(WsItem)), _sheetDragSource);
+        }
+
+        private void WorksheetDragOver(object sender, DragEventArgs e)
+        {
+            e.Effect = DragDropEffects.None;
+            if (!IsOwnSheetDrag(e)) { ClearSheetDropTarget(); return; }
+            UpdateSheetDropTarget(_lbWorksheets.PointToClient(new Point(e.X, e.Y)), false);
+            if (_sheetDropTarget != null && (e.AllowedEffect & DragDropEffects.Move) != 0) e.Effect = DragDropEffects.Move;
+        }
+
+        private void ClearSheetDropTarget()
+        {
+            _sheetDropTarget = null;
+            if (!_lbWorksheets.IsDisposed) _lbWorksheets.Invalidate();
+        }
+
+        private void UpdateSheetDropTarget(Point point, bool scroll)
+        {
+            if (!_draggingSheet || !IsSameWorkbook(_sheetDragWorkbook, _workbook) ||
+                !_lbWorksheets.ClientRectangle.Contains(point) || _lbWorksheets.Items.Count == 0)
+            { ClearSheetDropTarget(); return; }
+            if (scroll)
+            {
+                int direction = point.Y < 20 ? -1 : point.Y >= _lbWorksheets.ClientSize.Height - 20 ? 1 : 0;
+                int rows = Math.Max(1, _lbWorksheets.ClientSize.Height / _lbWorksheets.ItemHeight);
+                int maximum = Math.Max(0, _lbWorksheets.Items.Count - rows);
+                _lbWorksheets.TopIndex = Math.Max(0, Math.Min(maximum, _lbWorksheets.TopIndex + direction));
+            }
+            int index = _lbWorksheets.IndexFromPoint(point);
+            if (index < 0) index = _lbWorksheets.Items.Count - 1;
+            var target = (WsItem)_lbWorksheets.Items[index];
+            if (ReferenceEquals(target, _sheetDragSource)) { ClearSheetDropTarget(); return; }
+            Rectangle bounds = _lbWorksheets.GetItemRectangle(index);
+            _sheetDropTarget = target;
+            _sheetDropAfter = point.Y >= bounds.Top + bounds.Height / 2;
+            _lbWorksheets.Invalidate();
+        }
+
+        private void WorksheetDragDrop(object sender, DragEventArgs e)
+        {
+            e.Effect = DragDropEffects.None;
+            if (!IsOwnSheetDrag(e)) return;
+            UpdateSheetDropTarget(_lbWorksheets.PointToClient(new Point(e.X, e.Y)), false);
+            var target = _sheetDropTarget;
+            var source = _sheetDragSource;
+            bool after = _sheetDropAfter;
+            _sheetScrollTimer?.Stop();
+            _draggingSheet = false;
+            ClearSheetDropTarget();
+            if (target == null) return;
+            RunUserAction("无法调整工作表顺序", () =>
+            {
+                MoveWorksheet(source.Worksheet, target.Worksheet, after);
+                e.Effect = DragDropEffects.Move;
+            });
+            _addIn?.RefreshWorkbookPanes(_workbook, all: false);
+            RefreshWorksheets();
+        }
+
+        private void MoveWorksheet(Excel.Worksheet source, Excel.Worksheet target, bool after)
+        {
+            EnsureReady();
+            if (source == null || target == null || !IsSameWorkbook(source.Parent as Excel.Workbook, _workbook) ||
+                !IsSameWorkbook(target.Parent as Excel.Workbook, _workbook))
+                throw new InvalidOperationException("工作表已失效或不属于当前工作簿，请刷新后重试。");
+            if (_workbook.ProtectStructure) throw new InvalidOperationException("工作簿结构受保护，无法调整工作表顺序。");
+            var visibility = source.Visible;
+            if (visibility == Excel.XlSheetVisibility.xlSheetVeryHidden)
+                throw new InvalidOperationException("深度隐藏工作表保持只读，不支持拖动。");
+            int sourceIndex = source.Index, targetIndex = target.Index;
+            if (sourceIndex == targetIndex || sourceIndex == targetIndex + (after ? 1 : -1)) return;
+            object active = _window.ActiveSheet;
+            if (!(active is Excel.Worksheet) && !(active is Excel.Chart))
+                throw new InvalidOperationException("无法确认当前活动表，请刷新后重试。");
+            bool events = _app.EnableEvents, screen = _app.ScreenUpdating;
+            try
+            {
+                _app.EnableEvents = false;
+                _app.ScreenUpdating = false;
+                try
+                {
+                    if (after) source.Move(After: target);
+                    else source.Move(Before: target);
+                }
+                finally
+                {
+                    if (source.Visible != visibility) source.Visible = visibility;
+                    if (!ReferenceEquals(_window.ActiveSheet, active))
+                    {
+                        _window.Activate();
+                        if (active is Excel.Worksheet sheet) sheet.Activate();
+                        else if (active is Excel.Chart chart) chart.Activate();
+                    }
+                }
+                // WPS can silently ignore Move; verify the real sheet indices, including chart sheets.
+                if (source.Index != target.Index + (after ? 1 : -1))
+                    throw new InvalidOperationException("表格程序未完成工作表移动，请确认工作簿可编辑后重试。");
+            }
+            finally
+            {
+                try { _app.ScreenUpdating = screen; }
+                finally { _app.EnableEvents = events; }
+            }
         }
 
         private async void LbWorksheets_MouseClick(object sender, MouseEventArgs e)
@@ -1588,11 +1776,47 @@ namespace ExcelNavigatorPane
                 if (string.Equals(currentName, requestedName, StringComparison.CurrentCultureIgnoreCase)) return;
                 EnsureWorkbookNameIsAvailable(workbook, requestedName);
 
-                string targetPath = Path.Combine(directory, requestedName);
                 EnsureReady();
-                workbook.SaveAs(targetPath, FileFormat: workbook.FileFormat);
-                _addIn.RefreshAllPanes(all: true);
+                string warning;
+                try { warning = RenameWorkbookFile(workbook, requestedName, ReadOneDriveMappings().ToList()); }
+                finally { _addIn.RefreshAllPanes(all: true); }
+                if (warning != null) ShowInformation(warning);
             });
+        }
+
+        private static string RenameWorkbookFile(Excel.Workbook workbook, string requestedName,
+            IEnumerable<KeyValuePair<string, string>> mappings)
+        {
+            // Use the same mapping snapshot before and after SaveAs: Office may return an HTTPS FullName again.
+            if (string.IsNullOrWhiteSpace(requestedName) || requestedName.TrimEnd(' ', '.') != requestedName ||
+                requestedName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+                System.Text.RegularExpressions.Regex.IsMatch(requestedName,
+                    @"^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)",
+                    System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                throw new ArgumentException("文件名不能包含路径、非法字符或 Windows 保留名称。");
+            if (workbook.ReadOnly)
+                throw new InvalidOperationException("只读工作簿不能重命名，请先取得文件写入权限。");
+            string original = ResolveLocalWorkbookPath(workbook.FullName, mappings);
+            if (!File.Exists(original))
+                throw new FileNotFoundException("未找到原文件，请确认 OneDrive 文件已同步到本机后重试。", original);
+            string target = Path.Combine(Path.GetDirectoryName(original), requestedName);
+            if (string.Equals(original, target, StringComparison.OrdinalIgnoreCase)) return null;
+            if (File.Exists(target) || Directory.Exists(target))
+                throw new IOException("此文件夹中已存在同名文件或文件夹，请换一个名称。");
+
+            workbook.SaveAs(target, FileFormat: workbook.FileFormat);
+            if (!workbook.Saved ||
+                !string.Equals(ResolveLocalWorkbookPath(workbook.FullName, mappings), target, StringComparison.OrdinalIgnoreCase) ||
+                !File.Exists(target) || new FileInfo(target).Length == 0)
+                throw new IOException("未能确认新文件已保存到本机，旧文件已保留。请检查工作簿当前名称和同步状态后重试。");
+
+            try { File.Delete(original); }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                return "新文件已保存并打开，但旧文件未能删除，可能仍被占用。\n\n旧文件：" + original +
+                    "\n新文件：" + target + "\n\n请关闭相关文件并确认同步完成后，手动清理旧文件。";
+            }
+            return null;
         }
 
         private static string GetRenamedWorkbookName(string currentName, string requestedName)
@@ -1707,6 +1931,7 @@ namespace ExcelNavigatorPane
 
         private IntPtr HandleNavigationMouse(int code, IntPtr message, IntPtr data)
         {
+            if (_draggingSheet) return CallNextHookEx(_mouseHook, code, message, data);
             if (code == 0 && (message.ToInt32() == 0x0201 || message.ToInt32() == 0x0202))
             {
                 try
@@ -2276,6 +2501,7 @@ namespace ExcelNavigatorPane
                 if (_mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(_mouseHook); _mouseHook = IntPtr.Zero; }
                 _editRefreshTimer?.Dispose();
                 _updateTimer?.Dispose();
+                _sheetScrollTimer?.Dispose();
                 _workbookToolTip.Dispose();
                 foreach (Image image in _toolbarImages) image.Dispose();
                 _toolbarImages.Clear();
