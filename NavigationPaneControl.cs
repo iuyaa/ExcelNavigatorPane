@@ -14,6 +14,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Automation;
 using System.Windows.Forms;
+using Microsoft.Win32;
 using Excel = Microsoft.Office.Interop.Excel;
 using Office = Microsoft.Office.Core;
 
@@ -1116,7 +1117,7 @@ namespace ExcelNavigatorPane
             _hoveredWbCopy = copyHovered;
 
             if (!needsInvalidate) return;
-            _workbookToolTip.SetToolTip(_lbWorkbooks, copyHovered ? "复制文件（包含当前修改，可粘贴为附件）"
+            _workbookToolTip.SetToolTip(_lbWorkbooks, copyHovered ? "保存修改并复制原文件，可粘贴为附件"
                 : closeHovered ? "关闭工作簿" : null);
             if (previousIndex >= 0) _lbWorkbooks.Invalidate(_lbWorkbooks.GetItemRectangle(previousIndex));
             if (index >= 0) _lbWorkbooks.Invalidate(_lbWorkbooks.GetItemRectangle(index));
@@ -1313,42 +1314,93 @@ namespace ExcelNavigatorPane
                     ShowInformation("请先保存新工作簿，确定文件名和格式后再复制。");
                     if (!SaveWorkbookCore(workbook) || string.IsNullOrWhiteSpace(workbook.Path)) return;
                 }
-                string copy = CreateWorkbookClipboardCopy(workbook);
+                string file = GetWorkbookFileForClipboard(workbook);
+                bool readable = CanReadWorkbookFile(file);
                 var data = new DataObject();
-                data.SetFileDropList(new StringCollection { copy });
+                data.SetFileDropList(new StringCollection { file });
                 using (var effect = new MemoryStream(BitConverter.GetBytes((int)DragDropEffects.Copy)))
                 {
                     data.SetData("Preferred DropEffect", effect);
                     Clipboard.SetDataObject(data, true);
                 }
-                _workbookToolTip.Show("已复制文件，可粘贴到聊天窗口或邮件附件。", _lbWorkbooks,
+                if (!readable)
+                {
+                    ShowInformation("原文件路径已放入剪贴板，但文件当前无法读取，可能被 Excel/WPS 占用或尚未完成同步。\n\n请保存并关闭该工作簿，待文件可访问后再粘贴。");
+                    return;
+                }
+                _workbookToolTip.Show("已复制原文件，可粘贴到聊天窗口或邮件附件。", _lbWorkbooks,
                     new Point(8, Math.Max(0, _mouseLocWb.Y)), 2500);
             });
         }
 
-        private static string CreateWorkbookClipboardCopy(Excel.Workbook workbook)
+        private static string GetWorkbookFileForClipboard(Excel.Workbook workbook)
         {
-            string name = workbook.Name;
-            if (string.IsNullOrWhiteSpace(name) || Path.GetFileName(name) != name ||
-                name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || string.IsNullOrEmpty(Path.GetExtension(name)))
-                throw new InvalidOperationException("工作簿文件名或格式无效，请先另存为后重试。");
-            string directory = Path.Combine(Path.GetTempPath(), "ExcelNavigatorPane", "ClipboardFiles", Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(directory);
-            string copy = Path.Combine(directory, name);
+            if (!workbook.Saved) workbook.Save();
+            if (!workbook.Saved)
+                throw new InvalidOperationException("工作簿尚未保存，未复制文件。请完成保存后重试。");
+            string file = ResolveLocalWorkbookPath(workbook.FullName, ReadOneDriveMappings());
+            if (!File.Exists(file))
+                throw new FileNotFoundException("未找到原文件，请确认文件已保存并同步到本机。", file);
+            return file;
+        }
+
+        private static IEnumerable<KeyValuePair<string, string>> ReadOneDriveMappings()
+        {
+            using (var root = Registry.CurrentUser.OpenSubKey(@"Software\SyncEngines\Providers\OneDrive"))
+            {
+                if (root == null) yield break;
+                foreach (string name in root.GetSubKeyNames())
+                    using (var key = root.OpenSubKey(name))
+                    {
+                        string url = key?.GetValue("UrlNamespace") as string;
+                        string mount = key?.GetValue("MountPoint") as string;
+                        if (!string.IsNullOrWhiteSpace(url) && !string.IsNullOrWhiteSpace(mount))
+                            yield return new KeyValuePair<string, string>(url, mount);
+                    }
+            }
+        }
+
+        private static bool CanReadWorkbookFile(string file)
+        {
             try
             {
-                // Keep the snapshot after copying: paste may happen after Excel exits.
-                workbook.SaveCopyAs(copy);
-                if (!File.Exists(copy) || new FileInfo(copy).Length == 0)
-                    throw new IOException("未能生成工作簿副本，请稍后重试。");
-                return copy;
+                using (File.Open(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                    return true;
             }
-            catch
+            catch (IOException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+        }
+
+        private static string ResolveLocalWorkbookPath(string fullName, IEnumerable<KeyValuePair<string, string>> mappings)
+        {
+            Uri file;
+            if (!Uri.TryCreate(fullName, UriKind.Absolute, out file))
+                throw new InvalidOperationException("无法确定工作簿的实际文件路径，请先保存文件。");
+            if (file.IsFile) return Path.GetFullPath(file.LocalPath);
+            if (file.Scheme != Uri.UriSchemeHttps || file.UserInfo.Length != 0 || file.Query.Length != 0 || file.Fragment.Length != 0)
+                throw new InvalidOperationException("该工作簿地址无法对应本机文件。");
+
+            var candidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string cloudPath = Uri.UnescapeDataString(file.AbsolutePath);
+            foreach (var mapping in mappings)
             {
-                try { File.Delete(copy); Directory.Delete(directory); }
-                catch (Exception ex) { LogDebug("清理未完成的工作簿副本失败。", ex); }
-                throw;
+                Uri prefix;
+                if (!Uri.TryCreate(mapping.Key, UriKind.Absolute, out prefix) || prefix.Scheme != file.Scheme ||
+                    !string.Equals(prefix.Authority, file.Authority, StringComparison.OrdinalIgnoreCase)) continue;
+                string basePath = Uri.UnescapeDataString(prefix.AbsolutePath).TrimEnd('/') + "/";
+                if (!cloudPath.StartsWith(basePath, StringComparison.OrdinalIgnoreCase)) continue;
+                string relative = cloudPath.Substring(basePath.Length);
+                if (relative.Length == 0 || relative.Split('/').Any(part => part.Length == 0 || part == "." || part == ".." ||
+                    part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)) continue;
+                Uri localRoot;
+                if (!Uri.TryCreate(mapping.Value, UriKind.Absolute, out localRoot) || !localRoot.IsFile) continue;
+                string mount = Path.GetFullPath(localRoot.LocalPath).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                string candidate = Path.GetFullPath(Path.Combine(mount, relative.Replace('/', Path.DirectorySeparatorChar)));
+                if (candidate.StartsWith(mount, StringComparison.OrdinalIgnoreCase)) candidates.Add(candidate);
             }
+            if (candidates.Count != 1)
+                throw new InvalidOperationException("无法唯一确定 OneDrive 文件的本机路径，请确认此目录已同步到本机。");
+            return candidates.Single();
         }
 
         private void RenameWorkbook(Excel.Workbook workbook)

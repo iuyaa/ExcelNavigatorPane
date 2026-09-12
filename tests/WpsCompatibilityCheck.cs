@@ -38,47 +38,64 @@ class WpsCompatibilityCheck
     static void CheckWorkbookCopy(Type controlType)
     {
         Type bookType=controlType.GetField("_workbook",F).FieldType;
-        var create=controlType.GetMethod("CreateWorkbookClipboardCopy",F);
-        string name="长文件名.2026.v2.xlsm", written=null;
-        int mode=0, calls=0;
+        var getFile=controlType.GetMethod("GetWorkbookFileForClipboard",F);
+        var resolve=controlType.GetMethod("ResolveLocalWorkbookPath",F);
+        var readable=controlType.GetMethod("CanReadWorkbookFile",F);
+        string folder=Path.Combine(Path.GetTempPath(),"ExcelNavigatorOriginalCheck-"+Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        string file=Path.Combine(folder,"Original # 100%.xlsm");
+        string actual=file;
+        bool saved=false;
+        int saves=0, mode=0;
         object book=Proxy(bookType,c => {
-            if(c.MethodName=="get_Name") return name;
-            if(c.MethodName=="SaveCopyAs") {
-                calls++; written=(string)c.Args[0];
-                if(mode!=1) File.WriteAllText(written,"current edited content");
-                if(mode==2) throw new IOException("Export failed after partial write");
+            if(c.MethodName=="get_Saved") return saved;
+            if(c.MethodName=="get_FullName") { Require(saved,"Must save before resolving actual file"); return actual; }
+            if(c.MethodName=="Save") {
+                saves++;
+                if(mode==2) throw new IOException("Save failed");
+                if(mode==0) { File.WriteAllText(file,"latest edits"); saved=true; }
                 return null;
             }
-            throw new Exception("Copy must not save/activate/rename source or read its cloud path: "+c.MethodName);
+            throw new Exception("Actual-file copy must not export, activate or rename source: "+c.MethodName);
         });
-        var copies=new List<string>();
         try {
-            for(int i=0;i<2;i++) {
-                string file=(string)create.Invoke(null,new[]{book}); copies.Add(file);
-                Require(Path.GetFileName(file)==name && File.ReadAllText(file)=="current edited content","Snapshot must retain filename, format and current content");
-                Require(file.StartsWith(Path.Combine(Path.GetTempPath(),"ExcelNavigatorPane","ClipboardFiles")+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase),"Snapshot must stay in dedicated temp folder");
-            }
-            Require(copies[0]!=copies[1],"Repeated copies must not overwrite a prior clipboard snapshot");
+            File.WriteAllText(file,"old contents");
+            Require((string)getFile.Invoke(null,new[]{book})==file && saves==1 && File.ReadAllText(file)=="latest edits","Must save and return exact original file, including literal # and percent");
+            Require((string)getFile.Invoke(null,new[]{book})==file && saves==1,"Already-saved file needs no extra save or snapshot");
+            Require((bool)readable.Invoke(null,new object[]{file}),"Readable original must not warn");
+            using(var locked=File.Open(file,FileMode.Open,FileAccess.ReadWrite,FileShare.None))
+                Require(!(bool)readable.Invoke(null,new object[]{file}),"Locked original needs warning before paste");
             foreach(int failure in new[]{1,2}) {
-                mode=failure;
-                try { create.Invoke(null,new[]{book}); throw new Exception("Failed export accepted"); }
-                catch(TargetInvocationException ex) { Require(ex.InnerException is IOException,"Export error must propagate"); }
-                Require(!File.Exists(written) && !Directory.Exists(Path.GetDirectoryName(written)),"Failed export must clean only its temporary snapshot");
+                saved=false;mode=failure;
+                try { getFile.Invoke(null,new[]{book}); throw new Exception("Canceled/failed save accepted"); }
+                catch(TargetInvocationException ex) { Require(ex.InnerException is IOException || ex.InnerException is InvalidOperationException,"Save must fail before clipboard update"); }
             }
-            int previous=calls; name="../escape.xlsx";
-            try { create.Invoke(null,new[]{book}); throw new Exception("Invalid filename accepted"); }
-            catch(TargetInvocationException ex) { Require(ex.InnerException is InvalidOperationException,"Filename validation"); }
-            Require(calls==previous,"Invalid filename must not call Office export");
+            saved=true; actual=Path.Combine(folder,"missing.xlsx");
+            try { getFile.Invoke(null,new[]{book}); throw new Exception("Missing original accepted"); }
+            catch(TargetInvocationException ex) { Require(ex.InnerException is FileNotFoundException,"Missing original must fail explicitly"); }
+            var mappings=new List<KeyValuePair<string,string>> {
+                new KeyValuePair<string,string>("https://example.sharepoint.com/Documents/",folder),
+                new KeyValuePair<string,string>("https://example.sharepoint.com/Documents/",folder)
+            };
+            string url="https://example.sharepoint.com/Documents/Original%20%23%20100%25.xlsm";
+            Require((string)resolve.Invoke(null,new object[]{url,mappings})==file,"Decode actual filename and merge duplicate mappings");
+            Require((string)resolve.Invoke(null,new object[]{"https://example.sharepoint.com/Documents/sub/a+b.xlsx",mappings})==Path.Combine(folder,"sub","a+b.xlsx"),"URL plus sign is literal in a filename");
+            foreach(string invalid in new[]{"relative.xlsx","https://other.sharepoint.com/Documents/a.xlsx","https://example.sharepoint.com/Documents-other/a.xlsx","https://example.sharepoint.com/Documents/../escape.xlsx","https://example.sharepoint.com/Documents/%5Cescape.xlsx"}) {
+                try { resolve.Invoke(null,new object[]{invalid,mappings}); throw new Exception("Unsafe or unmapped address accepted: "+invalid); }
+                catch(TargetInvocationException ex) { Require(ex.InnerException is InvalidOperationException,"Invalid mapping must fail closed"); }
+            }
+            mappings.Add(new KeyValuePair<string,string>("https://example.sharepoint.com/Documents/",Path.Combine(folder,"other-root")));
+            try { resolve.Invoke(null,new object[]{url,mappings}); throw new Exception("Ambiguous roots accepted"); }
+            catch(TargetInvocationException ex) { Require(ex.InnerException is InvalidOperationException,"Conflicting sync mappings must not guess"); }
+            Require(Directory.GetFiles(folder).Length==1,"Copy must not create extra files");
             foreach(int width in new[]{280,320,400}) {
                 var row=new System.Drawing.Rectangle(0,0,width,30);
                 var copy=(System.Drawing.Rectangle)controlType.GetMethod("GetWbCopyRect",F).Invoke(null,new object[]{row});
                 var close=(System.Drawing.Rectangle)controlType.GetMethod("GetWbCloseRect",F).Invoke(null,new object[]{row});
                 Require(copy.Right<=close.Left && row.Contains(copy) && row.Contains(close),"Copy must precede close without overlapping");
             }
-        } finally {
-            foreach(string file in copies) { File.Delete(file); Directory.Delete(Path.GetDirectoryName(file)); }
-        }
-        Console.WriteLine("PASS: current-content export, independent snapshots, filename preservation, failed/invalid export cleanup and copy-button placement; system clipboard untouched");
+        } finally { File.Delete(file); Directory.Delete(folder); }
+        Console.WriteLine("PASS: save then copy actual path, canceled/failed save rejection, OneDrive URL mapping and boundaries, no temporary copies; clipboard untouched");
     }
     static void CheckWorksheetRefresh(Type controlType, Type addinType)
     {
