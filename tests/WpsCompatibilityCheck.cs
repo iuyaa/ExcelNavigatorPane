@@ -42,6 +42,19 @@ class WpsCompatibilityCheck
             var assembly = Assembly.LoadFrom(args[0]);
             var addinType = assembly.GetType("ExcelNavigatorPane.ThisAddIn");
             var controlType = assembly.GetType("ExcelNavigatorPane.NavigationPaneControl");
+            var rename = controlType.GetMethod("GetRenamedWorkbookName", F);
+            foreach (var sample in new[] {
+                new[] { "Report.xlsx", "Report2026", "Report2026.xlsx" },
+                new[] { "Report.xlsx", "Report2026.09", "Report2026.09.xlsx" },
+                new[] { "Report.xlsx", "Report.v2", "Report.v2.xlsx" },
+                new[] { "Report.xlsx", "New.xlsx", "New.xlsx" },
+                new[] { "Report.xlsx", "New.XLSX", "New.xlsx" },
+                new[] { "Report.xlsm", "New.v2", "New.v2.xlsm" },
+                new[] { "Report.xlsb", "New.xlsb", "New.xlsb" },
+                new[] { "Report.xlsx", "New.xlsm", "New.xlsm.xlsx" }
+            }) Require((string)rename.Invoke(null,new object[]{sample[0],sample[1]})==sample[2],"Rename must preserve the original extension: " + sample[1]);
+            try { rename.Invoke(null,new object[]{"Report.xlsx",".xlsx"}); throw new Exception("Extension-only name accepted"); }
+            catch(TargetInvocationException ex) { Require(ex.InnerException is ArgumentException,"Wrong extension-only error"); }
             object addin = FormatterServices.GetUninitializedObject(addinType);
             var dictionary = (IDictionary)Activator.CreateInstance(addinType.GetField("_windowPanes",F).FieldType);
             Set(addin,"_windowPanes",dictionary);
@@ -60,14 +73,19 @@ class WpsCompatibilityCheck
             object windows = Proxy(windowsType,c => c.MethodName == "GetEnumerator" ? liveWindows.GetEnumerator()
                 : c.MethodName == "get_Item" || c.MethodName == "get__Default" ? liveWindows[Convert.ToInt32(c.Args[0])-1] : (object)liveWindows.Count);
             object commandBars = Proxy(applicationMembers.First(p => p.Name == "CommandBars").PropertyType,c => true);
+            string bookName = "Original.xlsx";
             object book = Proxy(workbookType,c => {
+                if(c.MethodName == "get_Name") return bookName;
                 if(c.MethodName == "get_ProtectStructure") return false;
                 if(c.MethodName == "Activate") { activations.Add("book"); return null; }
                 if(c.MethodName == "Close") { activations.Add("close-book"); return null; }
                 if(c.MethodName == "get_Windows") return windows;
                 throw new Exception("Unexpected workbook call: " + c.MethodName);
             });
+            object books = Proxy(applicationMembers.First(p => p.Name == "Workbooks").PropertyType,
+                c => c.MethodName == "GetEnumerator" ? new[] { book }.GetEnumerator() : (object)1);
             object app = Proxy(applicationType,c => {
+                if(c.MethodName == "get_Workbooks") return books;
                 if(c.MethodName == "get_Ready") return ready;
                 if(c.MethodName == "get_CommandBars") return commandBars;
                 if(c.MethodName == "get_Windows") return windows;
@@ -86,6 +104,7 @@ class WpsCompatibilityCheck
                 frame.Controls.Add(firstTab); frame.Controls.Add(secondTab);
                 IntPtr hwnd = frame.Handle, tab1 = firstTab.Handle, tab2 = secondTab.Handle;
                 Func<IntPtr,object> window = handle => Proxy(windowType,c => {
+                    if(c.MethodName == "get_Visible") return true;
                     if(c.MethodName == "get_Hwnd") return handle.ToInt32();
                     if(c.MethodName == "Activate") { activations.Add("window"); return null; }
                     throw new Exception("Unexpected window call: " + c.MethodName);
@@ -157,6 +176,25 @@ class WpsCompatibilityCheck
                 catch(InvalidOperationException) { }
                 Require(activations.Count == 0,"Busy WPS must not call Activate");
                 ready = true; liveWindows.Clear();
+                // SaveAs can finish while Excel still reports busy: keep the old row until the deferred retry.
+                Set(control,"_workbook",null); liveWindows.Add(win1);
+                Call(control,"RefreshWorkbooks",false);
+                Require(workbookList.Items.Count==1 && workbookList.Items[0].ToString()=="Original.xlsx","Initial workbook name");
+                bookName="Renamed.xlsx"; ready=false;
+                Call(control,"RefreshWorkbooks",false);
+                var retry=(Timer)controlType.GetField("_editRefreshTimer",F).GetValue(control);
+                Require(retry!=null && retry.Enabled,"Busy refresh must be retried automatically");
+                Call(retry,"OnTick",EventArgs.Empty);
+                Require(retry.Enabled && workbookList.Items[0].ToString()=="Original.xlsx","Do not refresh while busy");
+                ready=true; Call(retry,"OnTick",EventArgs.Empty);
+                Require(!retry.Enabled && workbookList.Items[0].ToString()=="Renamed.xlsx","Retry must replace stale name after save");
+                Set(addin,"_refreshQueued",true); Set(addin,"_queuedFullRefresh",false);
+                Call(addin,"Application_WorkbookAfterSave",book,false);
+                Require(!(bool)addinType.GetField("_queuedFullRefresh",F).GetValue(addin),"Failed save must not enqueue a rename refresh");
+                Call(addin,"Application_WorkbookAfterSave",book,true);
+                Require((bool)addinType.GetField("_queuedFullRefresh",F).GetValue(addin),"Successful save must enqueue all workbook lists");
+                Set(addin,"_refreshQueued",false); Set(addin,"_queuedFullRefresh",false);
+                Set(control,"_workbook",book); liveWindows.Clear();
                 int created = 0, removed = 0;
                 object stalePane = Proxy(taskPaneType,c => c.MethodName == "get_Window" ? win1 : c.MethodName == "get_Visible" ? (object)true : null);
                 Set(addin,"CustomTaskPanes",Proxy(addinType.GetField("CustomTaskPanes",F).FieldType,c => {
@@ -181,7 +219,7 @@ class WpsCompatibilityCheck
                 Call(addin,"CleanupClosedPanes");
                 Require(dictionary.Count == 0 && sharedControl.IsDisposed && removed == 1,"Closing the last tab must remove/dispose the pane even when Pane.Window remains non-null");
             }
-            Console.WriteLine("PASS: shared/distinct frame keys, Excel isolation, foreign PID rejection, unhide activation order, COM workbook switch, busy guard, tab-close and last-close cleanup (offline)");
+            Console.WriteLine("PASS: save success/failure and deferred rename refresh, shared/distinct frame keys, Excel isolation, foreign PID rejection, unhide activation order, COM workbook switch, busy guard, tab-close and last-close cleanup (offline)");
             return 0;
         }
         catch(Exception ex) { Console.WriteLine(ex); return 1; }

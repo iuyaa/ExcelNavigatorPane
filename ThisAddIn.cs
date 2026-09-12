@@ -52,6 +52,7 @@ namespace ExcelNavigatorPane
                 this.Application.WorkbookOpen += Application_WorkbookOpen;
                 this.Application.WorkbookActivate += Application_WorkbookActivate;
                 this.Application.WorkbookBeforeClose += Application_WorkbookBeforeClose;
+                this.Application.WorkbookAfterSave += Application_WorkbookAfterSave;
                 this.Application.SheetActivate += Application_SheetActivate;
                 this.Application.WorkbookNewSheet += Application_WorkbookNewSheet;
                 this.Application.SheetBeforeDelete += Application_SheetBeforeDelete;
@@ -77,6 +78,7 @@ namespace ExcelNavigatorPane
                 this.Application.WorkbookOpen -= Application_WorkbookOpen;
                 this.Application.WorkbookActivate -= Application_WorkbookActivate;
                 this.Application.WorkbookBeforeClose -= Application_WorkbookBeforeClose;
+                this.Application.WorkbookAfterSave -= Application_WorkbookAfterSave;
                 this.Application.SheetActivate -= Application_SheetActivate;
                 this.Application.WorkbookNewSheet -= Application_WorkbookNewSheet;
                 this.Application.SheetBeforeDelete -= Application_SheetBeforeDelete;
@@ -155,6 +157,11 @@ namespace ExcelNavigatorPane
             }
 
             SafeRefresh(all: true);
+        }
+
+        private void Application_WorkbookAfterSave(Excel.Workbook workbook, bool success)
+        {
+            if (success) QueueRefresh(all: true);
         }
 
         private void Application_WorkbookBeforeClose(Excel.Workbook workbook, ref bool cancel)

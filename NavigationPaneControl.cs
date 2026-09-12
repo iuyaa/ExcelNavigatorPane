@@ -294,6 +294,7 @@ namespace ExcelNavigatorPane
                 bool ready = GetValue(() => _app.Ready, reportErrors);
                 if (!ready)
                 {
+                    RefreshAfterEdit();
                     if (reportErrors) throw new InvalidOperationException("Excel 正在编辑单元格，请结束编辑后重试。");
                     return;
                 }
@@ -1262,7 +1263,7 @@ namespace ExcelNavigatorPane
                 string currentExtension = Path.GetExtension(currentName);
                 string defaultName = Path.GetFileNameWithoutExtension(currentName);
                 object input = _app.InputBox(
-                    "请输入新的工作簿文件名：",
+                    "请输入新的工作簿名称，扩展名 " + currentExtension + " 将自动保留：",
                     "重命名工作簿",
                     defaultName,
                     Type: 2);
@@ -1282,19 +1283,26 @@ namespace ExcelNavigatorPane
                     return;
                 }
 
-                if (Path.GetExtension(requestedName).Length == 0)
-                {
-                    requestedName += currentExtension;
-                }
+                requestedName = GetRenamedWorkbookName(currentName, requestedName);
 
                 if (string.Equals(currentName, requestedName, StringComparison.CurrentCultureIgnoreCase)) return;
                 EnsureWorkbookNameIsAvailable(workbook, requestedName);
 
                 string targetPath = Path.Combine(directory, requestedName);
                 EnsureReady();
-                workbook.SaveAs(targetPath);
+                workbook.SaveAs(targetPath, FileFormat: workbook.FileFormat);
                 _addIn.RefreshAllPanes(all: true);
             });
+        }
+
+        private static string GetRenamedWorkbookName(string currentName, string requestedName)
+        {
+            string extension = Path.GetExtension(currentName);
+            if (extension.Length > 0 && requestedName.EndsWith(extension, StringComparison.OrdinalIgnoreCase))
+                requestedName = requestedName.Substring(0, requestedName.Length - extension.Length);
+            if (string.IsNullOrWhiteSpace(requestedName))
+                throw new ArgumentException("请输入文件名，不能只输入扩展名。");
+            return requestedName + extension;
         }
 
         private void EnsureWorkbookNameIsAvailable(Excel.Workbook target, string requestedName)
