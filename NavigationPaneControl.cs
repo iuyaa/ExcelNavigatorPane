@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
@@ -60,6 +61,7 @@ namespace ExcelNavigatorPane
         private Excel.Application _app;
         private Excel.Window _window;
         private Excel.Workbook _workbook;
+        private Excel.Workbook _worksheetListWorkbook;
         private ThisAddIn _addIn;
         private IntPtr _windowHwnd;
         private uint _excelProcessId;
@@ -139,6 +141,8 @@ namespace ExcelNavigatorPane
 
         private int _hoveredWbIndex = -1;
         private bool _hoveredWbClose;
+        private bool _hoveredWbCopy;
+        private readonly ToolTip _workbookToolTip = new ToolTip();
         private int _hoveredWsIndex = -1;
         private bool _hoveredWsEye;
         private bool _hoveredWsLock;
@@ -367,6 +371,13 @@ namespace ExcelNavigatorPane
                     return;
                 }
 
+                bool sameWorkbook = IsSameWorkbook(_worksheetListWorkbook, _workbook);
+                int oldTopIndex = _lbWorksheets.TopIndex;
+                var oldTop = sameWorkbook && _lbWorksheets.Items.Count > 0
+                    ? (WsItem)_lbWorksheets.Items[oldTopIndex] : null;
+                var oldActive = sameWorkbook
+                    ? _lbWorksheets.Items.Cast<WsItem>().FirstOrDefault(item => item.IsActive) : null;
+
                 _lbWorksheets.BeginUpdate();
                 updating = true;
                 _lbWorksheets.Items.Clear();
@@ -428,6 +439,21 @@ namespace ExcelNavigatorPane
 
                 UpdateCounts(total, visible, hidden);
                 if (activeIndex >= 0) _lbWorksheets.SelectedIndex = activeIndex;
+                if (oldTop != null && _lbWorksheets.Items.Count > 0)
+                {
+                    int anchor = _lbWorksheets.Items.Cast<WsItem>().ToList()
+                        .FindIndex(item => SameWorksheet(item, oldTop));
+                    _lbWorksheets.TopIndex = anchor >= 0 ? anchor
+                        : Math.Min(oldTopIndex, _lbWorksheets.Items.Count - 1);
+                    if (activeIndex >= 0 && !SameWorksheet((WsItem)_lbWorksheets.Items[activeIndex], oldActive))
+                    {
+                        int rows = Math.Max(1, _lbWorksheets.ClientSize.Height / _lbWorksheets.ItemHeight);
+                        if (activeIndex < _lbWorksheets.TopIndex) _lbWorksheets.TopIndex = activeIndex;
+                        else if (activeIndex >= _lbWorksheets.TopIndex + rows)
+                            _lbWorksheets.TopIndex = activeIndex - rows + 1;
+                    }
+                }
+                _worksheetListWorkbook = _workbook;
                 UpdateHiddenSheetsButton();
                 UpdateRecentSheetsButton();
             }
@@ -734,6 +760,14 @@ namespace ExcelNavigatorPane
             }, null);
         }
 
+        private static bool SameWorksheet(WsItem first, WsItem second)
+        {
+            return first != null && second != null &&
+                (ReferenceEquals(first.Worksheet, second.Worksheet) ||
+                 (!string.IsNullOrEmpty(first.CodeName) &&
+                  string.Equals(first.CodeName, second.CodeName, StringComparison.OrdinalIgnoreCase)));
+        }
+
         private bool ShouldListWorksheet(string name, Excel.XlSheetVisibility visibility, string filter)
         {
             return (_btnListHiddenSheets.Checked || visibility == Excel.XlSheetVisibility.xlSheetVisible) &&
@@ -842,6 +876,10 @@ namespace ExcelNavigatorPane
                             graphics.DrawLine(pen, 4, 4, 12, 12);
                             graphics.DrawLine(pen, 12, 4, 4, 12);
                             break;
+                        case "copy":
+                            graphics.DrawLines(pen, new[] { new Point(5, 11), new Point(2, 11), new Point(2, 2), new Point(11, 2), new Point(11, 5) });
+                            graphics.DrawRectangle(pen, 5, 5, 9, 9);
+                            break;
                         case "more":
                             using (var brush = new SolidBrush(color))
                                 for (int x = 3; x <= 13; x += 5) graphics.FillEllipse(brush, x - 1, 7, 2, 2);
@@ -868,6 +906,7 @@ namespace ExcelNavigatorPane
                 new ToolStripSeparator(),
                 new ToolStripMenuItem("保存", null, (sender, args) => SaveWorkbook(_workbookMenuTarget)),
                 new ToolStripMenuItem("重命名...", null, (sender, args) => RenameWorkbook(_workbookMenuTarget)),
+                new ToolStripMenuItem("复制文件", null, (sender, args) => CopyWorkbookFile(_workbookMenuTarget)),
                 new ToolStripMenuItem("关闭", null, (sender, args) => CloseWorkbook(_workbookMenuTarget))
             };
             return new ToolStripItem[]
@@ -961,7 +1000,7 @@ namespace ExcelNavigatorPane
                 e.Graphics,
                 item.Name,
                 font,
-                new Rectangle(e.Bounds.Left + 32, e.Bounds.Top, e.Bounds.Width - 64, e.Bounds.Height),
+                new Rectangle(e.Bounds.Left + 32, e.Bounds.Top, Math.Max(0, e.Bounds.Width - 92), e.Bounds.Height),
                 ColorTextMain,
                 TextFormatFlags.VerticalCenter |
                 TextFormatFlags.Left |
@@ -969,6 +1008,8 @@ namespace ExcelNavigatorPane
 
             if (item.IsActive || hovered || (e.State & DrawItemState.Focus) != 0)
             {
+                Rectangle copyRect = GetWbCopyRect(e.Bounds);
+                DrawRowAction(e.Graphics, copyRect, "copy", copyRect.Contains(_mouseLocWb));
                 Rectangle closeRect = GetWbCloseRect(e.Bounds);
                 DrawRowAction(e.Graphics, closeRect, "close", closeRect.Contains(_mouseLocWb));
             }
@@ -1044,6 +1085,11 @@ namespace ExcelNavigatorPane
             return new Rectangle(bounds.Right - 28, bounds.Top, 24, bounds.Height);
         }
 
+        private static Rectangle GetWbCopyRect(Rectangle bounds)
+        {
+            return new Rectangle(bounds.Right - 56, bounds.Top, 24, bounds.Height);
+        }
+
         private static Rectangle GetWsEyeRect(Rectangle bounds)
         {
             return new Rectangle(bounds.Right - 56, bounds.Top, 24, bounds.Height);
@@ -1060,13 +1106,18 @@ namespace ExcelNavigatorPane
             int index = _lbWorkbooks.IndexFromPoint(e.Location);
             bool closeHovered = index >= 0 &&
                                 GetWbCloseRect(_lbWorkbooks.GetItemRectangle(index)).Contains(e.Location);
-            bool needsInvalidate = previousIndex != index || _hoveredWbClose != closeHovered;
+            bool copyHovered = index >= 0 &&
+                               GetWbCopyRect(_lbWorkbooks.GetItemRectangle(index)).Contains(e.Location);
+            bool needsInvalidate = previousIndex != index || _hoveredWbClose != closeHovered || _hoveredWbCopy != copyHovered;
 
             _mouseLocWb = e.Location;
             _hoveredWbIndex = index;
             _hoveredWbClose = closeHovered;
+            _hoveredWbCopy = copyHovered;
 
             if (!needsInvalidate) return;
+            _workbookToolTip.SetToolTip(_lbWorkbooks, copyHovered ? "复制文件（包含当前修改，可粘贴为附件）"
+                : closeHovered ? "关闭工作簿" : null);
             if (previousIndex >= 0) _lbWorkbooks.Invalidate(_lbWorkbooks.GetItemRectangle(previousIndex));
             if (index >= 0) _lbWorkbooks.Invalidate(_lbWorkbooks.GetItemRectangle(index));
         }
@@ -1076,6 +1127,8 @@ namespace ExcelNavigatorPane
             _mouseLocWb = new Point(-1, -1);
             _hoveredWbIndex = -1;
             _hoveredWbClose = false;
+            _hoveredWbCopy = false;
+            _workbookToolTip.SetToolTip(_lbWorkbooks, null);
             _lbWorkbooks.Invalidate();
         }
 
@@ -1093,6 +1146,12 @@ namespace ExcelNavigatorPane
             object previous = _lbWorkbooks.SelectionBeforeClick;
             _lbWorkbooks.SelectedIndex = index;
             var item = (WbItem)_lbWorkbooks.Items[index];
+            if (e.Button == MouseButtons.Left &&
+                GetWbCopyRect(_lbWorkbooks.GetItemRectangle(index)).Contains(e.Location))
+            {
+                CopyWorkbookFile(item.Workbook);
+                return;
+            }
             if (e.Button == MouseButtons.Left &&
                 GetWbCloseRect(_lbWorkbooks.GetItemRectangle(index)).Contains(e.Location))
             {
@@ -1244,6 +1303,54 @@ namespace ExcelNavigatorPane
             return true;
         }
 
+        private void CopyWorkbookFile(Excel.Workbook workbook)
+        {
+            if (workbook == null) return;
+            RunUserAction("无法复制工作簿文件", () =>
+            {
+                if (string.IsNullOrWhiteSpace(workbook.Path))
+                {
+                    ShowInformation("请先保存新工作簿，确定文件名和格式后再复制。");
+                    if (!SaveWorkbookCore(workbook) || string.IsNullOrWhiteSpace(workbook.Path)) return;
+                }
+                string copy = CreateWorkbookClipboardCopy(workbook);
+                var data = new DataObject();
+                data.SetFileDropList(new StringCollection { copy });
+                using (var effect = new MemoryStream(BitConverter.GetBytes((int)DragDropEffects.Copy)))
+                {
+                    data.SetData("Preferred DropEffect", effect);
+                    Clipboard.SetDataObject(data, true);
+                }
+                _workbookToolTip.Show("已复制文件，可粘贴到聊天窗口或邮件附件。", _lbWorkbooks,
+                    new Point(8, Math.Max(0, _mouseLocWb.Y)), 2500);
+            });
+        }
+
+        private static string CreateWorkbookClipboardCopy(Excel.Workbook workbook)
+        {
+            string name = workbook.Name;
+            if (string.IsNullOrWhiteSpace(name) || Path.GetFileName(name) != name ||
+                name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || string.IsNullOrEmpty(Path.GetExtension(name)))
+                throw new InvalidOperationException("工作簿文件名或格式无效，请先另存为后重试。");
+            string directory = Path.Combine(Path.GetTempPath(), "ExcelNavigatorPane", "ClipboardFiles", Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            string copy = Path.Combine(directory, name);
+            try
+            {
+                // Keep the snapshot after copying: paste may happen after Excel exits.
+                workbook.SaveCopyAs(copy);
+                if (!File.Exists(copy) || new FileInfo(copy).Length == 0)
+                    throw new IOException("未能生成工作簿副本，请稍后重试。");
+                return copy;
+            }
+            catch
+            {
+                try { File.Delete(copy); Directory.Delete(directory); }
+                catch (Exception ex) { LogDebug("清理未完成的工作簿副本失败。", ex); }
+                throw;
+            }
+        }
+
         private void RenameWorkbook(Excel.Workbook workbook)
         {
             if (workbook == null) return;
@@ -1262,14 +1369,13 @@ namespace ExcelNavigatorPane
                 string currentName = workbook.Name;
                 string currentExtension = Path.GetExtension(currentName);
                 string defaultName = Path.GetFileNameWithoutExtension(currentName);
-                object input = _app.InputBox(
-                    "请输入新的工作簿名称，扩展名 " + currentExtension + " 将自动保留：",
-                    "重命名工作簿",
-                    defaultName,
-                    Type: 2);
-                if (input is bool && !(bool)input) return;
-
-                string requestedName = (Convert.ToString(input) ?? string.Empty).Trim();
+                string requestedName;
+                using (var dialog = new WorkbookRenameDialog(defaultName, currentExtension))
+                {
+                    dialog.Font = Font;
+                    if (dialog.ShowDialog(this) != DialogResult.OK) return;
+                    requestedName = dialog.InputName.Trim();
+                }
                 if (requestedName.Length == 0)
                 {
                     ShowInformation("文件名不能为空。");
@@ -1303,6 +1409,39 @@ namespace ExcelNavigatorPane
             if (string.IsNullOrWhiteSpace(requestedName))
                 throw new ArgumentException("请输入文件名，不能只输入扩展名。");
             return requestedName + extension;
+        }
+
+        private sealed class WorkbookRenameDialog : Form
+        {
+            private readonly TextBox _name;
+            public string InputName => _name.Text;
+
+            public WorkbookRenameDialog(string name, string extension)
+            {
+                Text = "重命名工作簿";
+                AutoScaleDimensions = new SizeF(96, 96);
+                AutoScaleMode = AutoScaleMode.Dpi;
+                ClientSize = new Size(640, 146);
+                MinimumSize = new Size(480, 185);
+                StartPosition = FormStartPosition.CenterParent;
+                MinimizeBox = MaximizeBox = false;
+                ShowInTaskbar = ShowIcon = false;
+                var prompt = new Label { Text = "请输入新名称，扩展名 " + extension + " 将自动保留：",
+                    AutoSize = true, Location = new Point(16, 16) };
+                _name = new TextBox { Text = name, AccessibleName = "工作簿名称",
+                    Location = new Point(16, 44), Width = 608,
+                    Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right };
+                var confirm = new Button { Text = "确定", DialogResult = DialogResult.OK,
+                    Location = new Point(444, 98), Size = new Size(84, 30),
+                    Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+                var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel,
+                    Location = new Point(540, 98), Size = new Size(84, 30),
+                    Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
+                Controls.AddRange(new Control[] { prompt, _name, confirm, cancel });
+                AcceptButton = confirm;
+                CancelButton = cancel;
+                Shown += (sender, args) => { _name.Focus(); _name.SelectAll(); };
+            }
         }
 
         private void EnsureWorkbookNameIsAvailable(Excel.Workbook target, string requestedName)
@@ -1393,7 +1532,7 @@ namespace ExcelNavigatorPane
                             {
                                 Rectangle bounds = list.GetItemRectangle(index);
                                 bool command = ReferenceEquals(list, _lbWorkbooks)
-                                    ? GetWbCloseRect(bounds).Contains(point)
+                                    ? GetWbCloseRect(bounds).Contains(point) || GetWbCopyRect(bounds).Contains(point)
                                     : GetWsEyeRect(bounds).Contains(point) || GetWsLockRect(bounds).Contains(point);
                                 if (command) { _pressedList = null; _pressedListIndex = -1; return CallNextHookEx(_mouseHook, code, message, data); }
                             }
@@ -1942,6 +2081,7 @@ namespace ExcelNavigatorPane
             {
                 if (_mouseHook != IntPtr.Zero) { UnhookWindowsHookEx(_mouseHook); _mouseHook = IntPtr.Zero; }
                 _editRefreshTimer?.Dispose();
+                _workbookToolTip.Dispose();
                 foreach (Image image in _toolbarImages) image.Dispose();
                 _toolbarImages.Clear();
                 _boldFont?.Dispose();
@@ -1956,6 +2096,7 @@ namespace ExcelNavigatorPane
             _currentWorksheet = null;
             _addIn = null;
             _workbook = null;
+            _worksheetListWorkbook = null;
             _workbookMenuTarget = null;
             _window = null;
             _app = null;

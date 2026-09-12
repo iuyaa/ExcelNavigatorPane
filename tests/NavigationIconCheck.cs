@@ -27,7 +27,7 @@ class NavigationIconCheck
             ((Color)decode.Invoke(null, new object[] { 1, 0 })).ToArgb() != Color.Black.ToArgb() ||
             ((Color)decode.Invoke(null, new object[] { 3, 255d })).ToArgb() != Color.Red.ToArgb())
             throw new Exception("Tab color conversion confused no color, black or OLE BGR.");
-        string[] names = { "book", "sheet", "add", "search", "refresh", "switch", "eye", "eye-off", "lock", "unlock", "close", "more" };
+        string[] names = { "book", "sheet", "add", "search", "refresh", "switch", "eye", "eye-off", "lock", "unlock", "copy", "close", "more" };
         using (var atlas = new Bitmap(names.Length * 80, 180))
         using (var g = Graphics.FromImage(atlas))
         {
@@ -127,6 +127,6 @@ class NavigationIconCheck
                 preview.Save(Path.Combine(args[1], "pane-" + width + ".png"), ImageFormat.Png);
             }
         }
-        Console.WriteLine("PASS: 12 icons at 16/20/24/32px; graphics state restored; pane previews at 280/320/400px");
+        Console.WriteLine("PASS: " + names.Length + " icons at 16/20/24/32px; graphics state restored; pane previews at 280/320/400px");
     }
 }

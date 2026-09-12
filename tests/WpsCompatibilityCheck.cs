@@ -4,6 +4,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Remoting.Messaging;
@@ -34,6 +35,132 @@ class WpsCompatibilityCheck
     }
     static void Set(object target,string field,object value) { target.GetType().GetField(field,F).SetValue(target,value); }
     static void Require(bool ok,string reason) { if(!ok) throw new Exception(reason); }
+    static void CheckWorkbookCopy(Type controlType)
+    {
+        Type bookType=controlType.GetField("_workbook",F).FieldType;
+        var create=controlType.GetMethod("CreateWorkbookClipboardCopy",F);
+        string name="长文件名.2026.v2.xlsm", written=null;
+        int mode=0, calls=0;
+        object book=Proxy(bookType,c => {
+            if(c.MethodName=="get_Name") return name;
+            if(c.MethodName=="SaveCopyAs") {
+                calls++; written=(string)c.Args[0];
+                if(mode!=1) File.WriteAllText(written,"current edited content");
+                if(mode==2) throw new IOException("Export failed after partial write");
+                return null;
+            }
+            throw new Exception("Copy must not save/activate/rename source or read its cloud path: "+c.MethodName);
+        });
+        var copies=new List<string>();
+        try {
+            for(int i=0;i<2;i++) {
+                string file=(string)create.Invoke(null,new[]{book}); copies.Add(file);
+                Require(Path.GetFileName(file)==name && File.ReadAllText(file)=="current edited content","Snapshot must retain filename, format and current content");
+                Require(file.StartsWith(Path.Combine(Path.GetTempPath(),"ExcelNavigatorPane","ClipboardFiles")+Path.DirectorySeparatorChar,StringComparison.OrdinalIgnoreCase),"Snapshot must stay in dedicated temp folder");
+            }
+            Require(copies[0]!=copies[1],"Repeated copies must not overwrite a prior clipboard snapshot");
+            foreach(int failure in new[]{1,2}) {
+                mode=failure;
+                try { create.Invoke(null,new[]{book}); throw new Exception("Failed export accepted"); }
+                catch(TargetInvocationException ex) { Require(ex.InnerException is IOException,"Export error must propagate"); }
+                Require(!File.Exists(written) && !Directory.Exists(Path.GetDirectoryName(written)),"Failed export must clean only its temporary snapshot");
+            }
+            int previous=calls; name="../escape.xlsx";
+            try { create.Invoke(null,new[]{book}); throw new Exception("Invalid filename accepted"); }
+            catch(TargetInvocationException ex) { Require(ex.InnerException is InvalidOperationException,"Filename validation"); }
+            Require(calls==previous,"Invalid filename must not call Office export");
+            foreach(int width in new[]{280,320,400}) {
+                var row=new System.Drawing.Rectangle(0,0,width,30);
+                var copy=(System.Drawing.Rectangle)controlType.GetMethod("GetWbCopyRect",F).Invoke(null,new object[]{row});
+                var close=(System.Drawing.Rectangle)controlType.GetMethod("GetWbCloseRect",F).Invoke(null,new object[]{row});
+                Require(copy.Right<=close.Left && row.Contains(copy) && row.Contains(close),"Copy must precede close without overlapping");
+            }
+        } finally {
+            foreach(string file in copies) { File.Delete(file); Directory.Delete(Path.GetDirectoryName(file)); }
+        }
+        Console.WriteLine("PASS: current-content export, independent snapshots, filename preservation, failed/invalid export cleanup and copy-button placement; system clipboard untouched");
+    }
+    static void CheckWorksheetRefresh(Type controlType, Type addinType)
+    {
+        Type appType = controlType.GetField("_app",F).FieldType;
+        Type bookType = controlType.GetField("_workbook",F).FieldType;
+        Type windowType = controlType.GetField("_window",F).FieldType;
+        Type sheetType = addinType.GetMethod("ToggleWorksheetVisibility",F).GetParameters()[0].ParameterType;
+        Type sheetsType = bookType.GetInterfaces().Concat(new[]{bookType}).SelectMany(t=>t.GetProperties()).First(p=>p.Name=="Worksheets").PropertyType;
+        var sheets = new ArrayList();
+        object active = null, book = null;
+        var visibilities = Enumerable.Repeat(-1,60).ToArray();
+        visibilities[30] = 0;
+        Action visibilityChanged = () => {};
+        object collection = Proxy(sheetsType,c => c.MethodName=="GetEnumerator" ? sheets.GetEnumerator() : (object)sheets.Count);
+        Func<IMethodCallMessage,object> bookHandler = c => c.MethodName=="get_Worksheets" ? collection : c.MethodName=="get_ProtectStructure" ? (object)false : null;
+        book = Proxy(bookType,bookHandler);
+        for(int i=0;i<60;i++) {
+            int index=i;
+            object sheet=null;
+            sheet=Proxy(sheetType,c => {
+                if(c.MethodName=="get_Name" || c.MethodName=="get_CodeName") return "Sheet"+index;
+                if(c.MethodName=="get_Visible") return Enum.ToObject(((MethodInfo)c.MethodBase).ReturnType,visibilities[index]);
+                if(c.MethodName=="set_Visible") { visibilities[index]=Convert.ToInt32(c.Args[0]); visibilityChanged(); return null; }
+                if(c.MethodName=="get_Parent") return book;
+                if(c.MethodName=="get_ProtectContents") return false;
+                if(c.MethodName=="get_Tab") return null;
+                if(c.MethodName=="Activate") { active=sheet; return null; }
+                throw new Exception("Unexpected scroll worksheet call: "+c.MethodName);
+            });
+            sheets.Add(sheet);
+        }
+        active=sheets[0];
+        object app=Proxy(appType,c => c.MethodName=="get_Ready" ? (object)true : null);
+        object window=Proxy(windowType,c => c.MethodName=="get_ActiveSheet" ? active : null);
+        using(var form=new Form { ClientSize=new System.Drawing.Size(360,700), ShowInTaskbar=false })
+        using(var control=(Control)Activator.CreateInstance(controlType)) {
+            control.Dock=DockStyle.Fill; form.Controls.Add(control);
+            IntPtr handle=form.Handle;
+            control.CreateControl(); form.PerformLayout();
+            Set(control,"_app",app); Set(control,"_workbook",book); Set(control,"_window",window);
+            var list=(ListBox)controlType.GetField("_lbWorksheets",F).GetValue(control);
+            handle=list.Handle;
+            Action refresh=()=>Call(control,"RefreshWorksheets",true);
+            refresh(); Require(list.Items.Count==60,"Scroll fixture must enumerate real refresh path");
+            list.TopIndex=25; int top=list.TopIndex;
+            Require(top==25,"Scroll fixture must have enough rows");
+            refresh(); Require(list.TopIndex==top,"Refresh must preserve scroll even when active sheet is above viewport");
+            visibilityChanged=refresh;
+            object addin=FormatterServices.GetUninitializedObject(addinType);
+            Set(addin,"_windowPanes",Activator.CreateInstance(addinType.GetField("_windowPanes",F).FieldType));
+            Set(addin,"_hiddenStates",Activator.CreateInstance(addinType.GetField("_hiddenStates",F).FieldType));
+            Set(addin,"<IsWpsHost>k__BackingField",true);
+            Set(control,"_addIn",addin);
+            Call(addin,"ToggleWorksheetVisibility",sheets[30],control);
+            refresh();
+            Require(visibilities[30]==-1 && ReferenceEquals(active,sheets[30]),"Unhide must activate target");
+            Require(list.TopIndex==top && list.SelectedIndex==30,"Unhide and intermediate refresh must preserve viewport");
+            refresh(); Require(list.TopIndex==top,"Repeated event refresh must retain viewport");
+            active=sheets[55]; refresh();
+            int rows=Math.Max(1,list.ClientSize.Height/list.ItemHeight);
+            Require(list.TopIndex==55-rows+1,"Offscreen activation must scroll only enough to reveal target");
+            list.TopIndex=25; string anchor=list.Items[list.TopIndex].ToString();
+            sheets.RemoveAt(0); refresh();
+            Require(list.Items[list.TopIndex].ToString()==anchor,"Removing an earlier sheet must preserve top sheet identity");
+            sheets.RemoveAt(list.TopIndex); refresh();
+            Require(list.TopIndex>0,"Removing anchor must retain a nearby position");
+            active=sheets[0]; Set(control,"_workbook",Proxy(bookType,bookHandler)); refresh();
+            Require(list.TopIndex==0,"Switching workbooks must not restore prior workbook scroll");
+            var filter=(ToolStripTextBox)controlType.GetField("_txtFilter",F).GetValue(control);
+            filter.Text="no matching worksheet"; refresh(); Require(list.Items.Count==0,"Empty filter results must be safe");
+            filter.Text=""; refresh(); Require(list.Items.Count==58,"Clearing filter must restore rows");
+        }
+        using(var dialog=(Form)Activator.CreateInstance(controlType.GetNestedType("WorkbookRenameDialog",F),new object[]{new string('长',100),".xlsx"})) {
+            var input=dialog.Controls.OfType<TextBox>().Single();
+            Require(dialog.ClientSize.Width>=640 && input.Width>=600,"Rename dialog must show a wider filename field");
+            Require(input.Text.Length==100,"Long default name must not be truncated");
+            int width=input.Width; dialog.Width+=180; dialog.PerformLayout();
+            Require(input.Width==width+180,"Filename field must expand with dialog");
+            Require(dialog.AcceptButton.DialogResult==DialogResult.OK && dialog.CancelButton.DialogResult==DialogResult.Cancel,"Rename keyboard confirmation/cancel contract");
+        }
+        Console.WriteLine("PASS: worksheet scroll preservation, unhide activation, repeated refresh, offscreen activation, removal/filter/book-switch boundaries; wide resizable rename dialog (offline)");
+    }
     [STAThread]
     static int Main(string[] args)
     {
@@ -42,6 +169,8 @@ class WpsCompatibilityCheck
             var assembly = Assembly.LoadFrom(args[0]);
             var addinType = assembly.GetType("ExcelNavigatorPane.ThisAddIn");
             var controlType = assembly.GetType("ExcelNavigatorPane.NavigationPaneControl");
+            CheckWorkbookCopy(controlType);
+            CheckWorksheetRefresh(controlType,addinType);
             var rename = controlType.GetMethod("GetRenamedWorkbookName", F);
             foreach (var sample in new[] {
                 new[] { "Report.xlsx", "Report2026", "Report2026.xlsx" },
@@ -159,7 +288,7 @@ class WpsCompatibilityCheck
                 activations.Clear();
                 Call(control,"LbWorkbooks_MouseClick",workbookList,new MouseEventArgs(MouseButtons.Right,1,4,workbookList.GetItemRectangle(1).Bottom+5,0));
                 Require(menuOpenings == 2 && controlType.GetField("_workbookMenuTarget",F).GetValue(control)==null,"Blank area must open a targetless menu");
-                foreach(string label in new[]{"保存","重命名...","关闭"}) Require(!menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank area must hide target-specific actions");
+                foreach(string label in new[]{"保存","重命名...","复制文件","关闭"}) Require(!menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank area must hide target-specific actions");
                 foreach(string label in new[]{"新建","打开...","排序","刷新列表","检查更新","关于导航栏"}) Require(menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank menu missing common action: "+label);
                 var headingStrip = (ToolStrip)controlType.GetField("_wbToolStrip",F).GetValue(control);
                 headingStrip.Items.Cast<ToolStripItem>().Single(i=>i.AccessibleName=="工作簿操作").PerformClick();
