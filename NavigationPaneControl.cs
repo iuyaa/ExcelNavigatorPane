@@ -75,7 +75,7 @@ namespace ExcelNavigatorPane
         private System.Windows.Forms.Timer _editRefreshTimer;
         private System.Windows.Forms.Timer _updateTimer;
         private LinkLabel _updateLink;
-        private Panel _updateFooter;
+        private Label _updateDot;
         private ToolStripMenuItem _checkUpdates;
         private UpdateChecker.UpdateInfo _availableUpdate;
         private bool _checkingUpdate;
@@ -640,6 +640,7 @@ namespace ExcelNavigatorPane
             {
                 Dock = DockStyle.Bottom,
                 Height = 28,
+                Padding = new Padding(0, 0, 8, 0),
                 BackColor = ColorSidebar
             };
             _lblCounts = new Label
@@ -648,9 +649,25 @@ namespace ExcelNavigatorPane
                 TextAlign = ContentAlignment.MiddleLeft,
                 Padding = new Padding(8, 0, 0, 0),
                 ForeColor = ColorTextSub,
-                Font = _countsFont
+                Font = _countsFont,
+                AutoEllipsis = true
             };
+            _updateLink = new LinkLabel { Text = "v" + UpdateChecker.CurrentVersion, Dock = DockStyle.Right,
+                Width = TextRenderer.MeasureText("v" + UpdateChecker.CurrentVersion, _countsFont).Width + 8,
+                Font = _countsFont, TextAlign = ContentAlignment.MiddleRight, LinkColor = ColorTextSub,
+                ActiveLinkColor = ColorTextMain, LinkBehavior = LinkBehavior.HoverUnderline, AccessibleName = "版本与更新" };
+            _updateDot = new Label { Text = "●", Dock = DockStyle.Right, Width = 14, Font = _countsFont,
+                TextAlign = ContentAlignment.MiddleRight, ForeColor = Color.Firebrick, Visible = false,
+                Cursor = Cursors.Hand, AccessibleName = "有新版本，点击查看更新" };
+            _updateLink.LinkClicked += (sender, args) =>
+            {
+                if (_availableUpdate == null) CheckUpdates(true);
+                else ShowUpdateDetails(_availableUpdate);
+            };
+            _updateDot.Click += (sender, args) => { if (_availableUpdate != null) ShowUpdateDetails(_availableUpdate); };
             worksheetBottomPanel.Controls.Add(_lblCounts);
+            worksheetBottomPanel.Controls.Add(_updateLink);
+            worksheetBottomPanel.Controls.Add(_updateDot);
 
             worksheetPanel.Controls.Add(_lbWorksheets);
             worksheetPanel.Controls.Add(sheetActions);
@@ -676,24 +693,8 @@ namespace ExcelNavigatorPane
             mainPanel.Controls.Add(_workbookSplitter);
             mainPanel.Controls.Add(_workbookPanel);
             mainPanel.SizeChanged += (sender, args) => UpdateWorkbookLayout();
-            _updateFooter = new Panel { Dock = DockStyle.Bottom, Height = 32, BackColor = ColorSidebar,
-                Padding = new Padding(8, 0, 8, 0) };
-            var guideLink = new LinkLabel { Text = "功能说明", Dock = DockStyle.Right, Width = 72,
-                TextAlign = ContentAlignment.MiddleRight, LinkColor = ColorTextSub, ActiveLinkColor = ColorTextMain,
-                LinkBehavior = LinkBehavior.HoverUnderline, AccessibleName = "查看功能说明" };
-            _updateLink = new LinkLabel { Text = "v" + UpdateChecker.CurrentVersion, Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, LinkColor = ColorTextSub,
-                ActiveLinkColor = ColorTextMain, LinkBehavior = LinkBehavior.HoverUnderline, AccessibleName = "版本与更新" };
-            _updateLink.LinkClicked += (sender, args) =>
-            {
-                if (_availableUpdate == null) CheckUpdates(true);
-                else ShowUpdateDetails(_availableUpdate);
-            };
-            guideLink.LinkClicked += (sender, args) => ShowFeatureGuide();
-            _updateFooter.Controls.Add(_updateLink);
-            _updateFooter.Controls.Add(guideLink);
             this.Controls.Add(mainPanel);
-            this.Controls.Add(_updateFooter);
+            RefreshUpdateStatus();
 
             _btnWbSortAZ.Click += (sender, args) => RunUserAction(
                 "无法排序工作簿",
@@ -761,14 +762,15 @@ namespace ExcelNavigatorPane
         private void RefreshUpdateStatus()
         {
             bool downloading = UpdateChecker.DownloadInProgress;
-            _updateLink.Enabled = _checkUpdates.Enabled = !downloading;
+            _updateLink.Enabled = _updateDot.Enabled = _checkUpdates.Enabled = !downloading;
             _checkUpdates.Text = downloading ? "正在下载安装包…" : "检查更新";
-            _updateLink.Text = downloading ? "正在下载安装包…" : _availableUpdate == null
-                ? "v" + UpdateChecker.CurrentVersion : "● 新版本 v" + _availableUpdate.Version + " · 查看更新";
-            _updateLink.LinkColor = _availableUpdate == null ? ColorTextSub : ColorExcelGreen;
-            _workbookToolTip.SetToolTip(_updateLink, _availableUpdate == null
+            _updateDot.Visible = _availableUpdate != null;
+            string hint = downloading ? "正在下载安装包…" : _availableUpdate == null
                 ? "当前版本：" + UpdateChecker.CurrentVersion + "；点击检查更新"
-                : "当前版本：" + UpdateChecker.CurrentVersion + "；点击查看 v" + _availableUpdate.Version + " 的更新内容");
+                : "当前版本：" + UpdateChecker.CurrentVersion + "；发现新版 v" + _availableUpdate.Version + "，点击查看更新内容";
+            _updateLink.AccessibleDescription = hint;
+            _workbookToolTip.SetToolTip(_updateLink, hint);
+            _workbookToolTip.SetToolTip(_updateDot, hint);
         }
 
         private void ShowUpdateDetails(UpdateChecker.UpdateInfo release)
@@ -803,7 +805,7 @@ namespace ExcelNavigatorPane
                 "• 拖动分隔线调整工作簿区高度，双击恢复自动高度。\r\n" +
                 "• 工作簿区域空白处也可右键打开菜单。\r\n" +
                 "• WPS 编辑或忙碌时暂不支持导航切换；Excel 的公式编辑导航受原生窗口和标签可用性限制。\r\n" +
-                "• 后台每六小时检查更新，有新版时在底部提示；点击查看更新内容，确认后才下载。", false))
+                "• 后台每六小时检查更新，有新版时在底部版本号后显示红点；点击版本号查看更新内容，确认后才下载。", false))
                 dialog.ShowDialog(this);
         }
 
@@ -941,7 +943,7 @@ namespace ExcelNavigatorPane
             int worksheetMinimum = worksheetPanel.Padding.Vertical + 3 * _lbWorksheets.ItemHeight;
             foreach (Control child in worksheetPanel.Controls)
                 if (child.Dock == DockStyle.Top || child.Dock == DockStyle.Bottom) worksheetMinimum += child.Height;
-            int available = Math.Max(0, ClientSize.Height - _workbookSplitter.Height - (_updateFooter?.Height ?? 0));
+            int available = Math.Max(0, ClientSize.Height - _workbookSplitter.Height);
             int maximum = Math.Max(0, available - worksheetMinimum);
             minimum = Math.Min(minimum, maximum);
             int desired = _manualWorkbookHeight ?? (header + Math.Max(5, _lbWorkbooks.Items.Count) * _lbWorkbooks.ItemHeight);
