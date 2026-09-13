@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.ComponentModel;
@@ -147,6 +147,9 @@ namespace ExcelNavigatorPane
         private ToolStripMenuItem _veryHiddenInfoMenuItem;
         private ToolStripMenuItem _toggleAllHiddenMenuItem;
 
+        private int _layoutDpi = 96;
+        private bool _applyingDpi;
+        private bool _layingOutCommands;
         private Font _baseFont;
         private Font _titleFont;
         private Font _countsFont;
@@ -224,7 +227,93 @@ namespace ExcelNavigatorPane
 
         public NavigationPaneControl()
         {
+            SuspendLayout();
+            AutoScaleDimensions = new SizeF(96, 96);
+            AutoScaleMode = AutoScaleMode.Dpi;
             InitializeComponents();
+            ResumeLayout(true);
+            ApplyDpiMetrics(DeviceDpi);
+        }
+
+        private int Px(int value) => (int)Math.Round(value * _layoutDpi / 96f);
+        private static int RowPx(Rectangle row, int value) => (int)Math.Round(value * row.Height / 30f);
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            if (_updateDot != null) ApplyDpiMetrics(DeviceDpi);
+        }
+
+        protected override void OnDpiChangedAfterParent(EventArgs e)
+        {
+            base.OnDpiChangedAfterParent(e);
+            ApplyDpiMetrics(DeviceDpi);
+        }
+
+        private void ApplyDpiMetrics(int dpi)
+        {
+            if (_updateDot == null || dpi <= 0 || _applyingDpi) return;
+            _applyingDpi = true;
+            int previous = _layoutDpi;
+            _layoutDpi = dpi;
+            SuspendLayout();
+            try
+            {
+                if (_manualWorkbookHeight.HasValue)
+                    _manualWorkbookHeight = (int)Math.Round(_manualWorkbookHeight.Value * dpi / (double)previous);
+                _lbWorkbooks.ItemHeight = _lbWorksheets.ItemHeight = Px(30);
+                _workbookPanel.Padding = new Padding(Px(8), Px(4), Px(8), Px(12));
+                _lbWorksheets.Parent.Padding = new Padding(Px(8), 0, Px(8), 0);
+                _workbookSplitter.Height = Px(6);
+                _lblCounts.Parent.Height = Px(28);
+                _lblCounts.Parent.Padding = new Padding(0, 0, Px(8), 0);
+                _lblCounts.Padding = new Padding(Px(8), 0, 0, 0);
+                using (var graphics = CreateGraphics())
+                    _updateLink.Width = TextRenderer.MeasureText(graphics, _updateLink.Text, _countsFont).Width + Px(8);
+                _updateDot.Width = Px(14);
+                var oldImages = _toolbarImages.ToArray();
+                _toolbarImages.Clear();
+                foreach (var strip in new[] { _wbToolStrip, _wsToolStrip, _txtFilter.Owner, _btnToggleHidden.Owner })
+                {
+                    strip.Font = _baseFont;
+                    strip.ImageScalingSize = new Size(Px(16), Px(16));
+                    strip.Padding = strip == _txtFilter.Owner ? new Padding(Px(6), Px(5), Px(6), Px(5)) : new Padding(0, Px(5), 0, Px(5));
+                    foreach (ToolStripItem item in strip.Items)
+                    {
+                        item.Margin = new Padding(Px(2), Px(1), Px(2), Px(2));
+                        if (item.Image?.Tag is string name) item.Image = CreateToolbarIcon(name);
+                    }
+                }
+                foreach (var image in oldImages) image.Dispose();
+                _btnClearFilter.Size = new Size(Px(24), Px(24));
+                var search = _txtFilter.Owner;
+                _txtFilter.Width = Math.Max(Px(40), search.ClientSize.Width - search.Padding.Horizontal - search.Items[0].Width - _btnClearFilter.Width - Px(12));
+                LayoutSheetCommands();
+            }
+            finally { ResumeLayout(true); _applyingDpi = false; }
+            UpdateWorkbookLayout();
+            Invalidate(true);
+        }
+
+        private void LayoutSheetCommands()
+        {
+            if (_btnRecentSheets?.Owner == null || _layingOutCommands) return;
+            _layingOutCommands = true;
+            try
+            {
+                var actions = _btnToggleHidden.Owner;
+                using (var graphics = actions.CreateGraphics())
+                {
+                    int labels = TextRenderer.MeasureText(graphics, _btnToggleHidden.Text, _baseFont).Width +
+                        TextRenderer.MeasureText(graphics, _btnRecentSheets.Text, _baseFont).Width;
+                    _btnToggleHidden.DisplayStyle = _btnRecentSheets.DisplayStyle = labels + Px(56) > actions.DisplayRectangle.Width
+                        ? ToolStripItemDisplayStyle.Image : ToolStripItemDisplayStyle.ImageAndText;
+                    int filter = TextRenderer.MeasureText(graphics, _btnListHiddenSheets.Text, _baseFont).Width;
+                    _btnListHiddenSheets.DisplayStyle = _worksheetHeading.Width + filter + Px(48) > _wsToolStrip.DisplayRectangle.Width
+                        ? ToolStripItemDisplayStyle.Image : ToolStripItemDisplayStyle.Text;
+                }
+            }
+            finally { _layingOutCommands = false; }
         }
 
         internal void Initialize(
@@ -594,7 +683,8 @@ namespace ExcelNavigatorPane
                 AutoSize = true
             };
             _worksheetHeading = new ToolStripLabel("工作表") { Font = _titleFont };
-            _btnListHiddenSheets = new ToolStripButton { Checked = true,
+            _btnListHiddenSheets = new ToolStripButton { Checked = true, Image = CreateToolbarIcon("eye-off"),
+                Overflow = ToolStripItemOverflow.Never,
                 DisplayStyle = ToolStripItemDisplayStyle.Text, Alignment = ToolStripItemAlignment.Right };
             _btnListHiddenSheets.CheckedChanged += (sender, args) => UpdateListedHiddenSheetsButton();
             UpdateListedHiddenSheetsButton();
@@ -613,7 +703,7 @@ namespace ExcelNavigatorPane
             _btnClearFilter.Click += (sender, args) => { _txtFilter.Clear(); _txtFilter.Focus(); };
             searchStrip.Items.AddRange(new ToolStripItem[] { searchIcon, _txtFilter, _btnClearFilter });
             searchStrip.SizeChanged += (sender, args) =>
-                _txtFilter.Width = Math.Max(40, searchStrip.ClientSize.Width - searchStrip.Padding.Horizontal - searchIcon.Width - _btnClearFilter.Width - 12);
+                _txtFilter.Width = Math.Max(Px(40), searchStrip.ClientSize.Width - searchStrip.Padding.Horizontal - searchIcon.Width - _btnClearFilter.Width - Px(12));
             _txtFilter.TextBox.HandleCreated += (sender, args) =>
                 SendMessage(_txtFilter.TextBox.Handle, 0x1501, new IntPtr(1), "搜索工作表…");
 
@@ -624,6 +714,11 @@ namespace ExcelNavigatorPane
             _btnRecentSheets = new ToolStripButton("最近两表") { Image = CreateToolbarIcon("switch"),
                 ToolTipText = "切换最近使用的两张工作表", Enabled = false, Alignment = ToolStripItemAlignment.Right };
             sheetActions.Items.AddRange(new ToolStripItem[] { _btnToggleHidden, _btnRecentSheets });
+            _btnToggleHidden.Overflow = _btnRecentSheets.Overflow = ToolStripItemOverflow.Never;
+            sheetActions.SizeChanged += (sender, args) => LayoutSheetCommands();
+            _wsToolStrip.SizeChanged += (sender, args) => LayoutSheetCommands();
+            _worksheetHeading.TextChanged += (sender, args) => LayoutSheetCommands();
+            _btnListHiddenSheets.TextChanged += (sender, args) => LayoutSheetCommands();
 
             _lbWorksheets = new NavigationListBox
             {
@@ -1057,9 +1152,9 @@ namespace ExcelNavigatorPane
 
         private Image CreateToolbarIcon(string name)
         {
-            var image = new Bitmap(16, 16);
+            var image = new Bitmap(Px(16), Px(16)) { Tag = name };
             using (Graphics g = Graphics.FromImage(image))
-                DrawNavigationIcon(g, new Rectangle(0, 0, 16, 16), name, ColorTextSub);
+                DrawNavigationIcon(g, new Rectangle(Point.Empty, image.Size), name, ColorTextSub);
             _toolbarImages.Add(image);
             return image;
         }
@@ -1153,11 +1248,11 @@ namespace ExcelNavigatorPane
             {
                 using (var brush = new SolidBrush(ColorKutoolsIndicator))
                 {
-                    e.Graphics.FillRectangle(brush, e.Bounds.X, e.Bounds.Y + 6, 2, e.Bounds.Height - 12);
+                    e.Graphics.FillRectangle(brush, e.Bounds.X, e.Bounds.Y + RowPx(e.Bounds, 6), RowPx(e.Bounds, 2), e.Bounds.Height - RowPx(e.Bounds, 12));
                 }
             }
 
-            DrawNavigationIcon(e.Graphics, new Rectangle(e.Bounds.Left + 9, e.Bounds.Top + (e.Bounds.Height - 16) / 2, 16, 16), "book", item.IsActive ? ColorExcelGreen : ColorTextSub);
+            DrawNavigationIcon(e.Graphics, new Rectangle(e.Bounds.Left + RowPx(e.Bounds, 9), e.Bounds.Top + (e.Bounds.Height - RowPx(e.Bounds, 16)) / 2, RowPx(e.Bounds, 16), RowPx(e.Bounds, 16)), "book", item.IsActive ? ColorExcelGreen : ColorTextSub);
             if ((e.State & DrawItemState.Focus) != 0) e.DrawFocusRectangle();
 
             Font font = item.IsActive ? _boldFont : e.Font;
@@ -1165,7 +1260,7 @@ namespace ExcelNavigatorPane
                 e.Graphics,
                 item.Name,
                 font,
-                new Rectangle(e.Bounds.Left + 32, e.Bounds.Top, Math.Max(0, e.Bounds.Width - 92), e.Bounds.Height),
+                new Rectangle(e.Bounds.Left + RowPx(e.Bounds, 32), e.Bounds.Top, Math.Max(0, e.Bounds.Width - RowPx(e.Bounds, 92)), e.Bounds.Height),
                 ColorTextMain,
                 TextFormatFlags.VerticalCenter |
                 TextFormatFlags.Left |
@@ -1198,14 +1293,14 @@ namespace ExcelNavigatorPane
             {
                 using (var brush = new SolidBrush(ColorKutoolsIndicator))
                 {
-                    e.Graphics.FillRectangle(brush, e.Bounds.X, e.Bounds.Y + 6, 2, e.Bounds.Height - 12);
+                    e.Graphics.FillRectangle(brush, e.Bounds.X, e.Bounds.Y + RowPx(e.Bounds, 6), RowPx(e.Bounds, 2), e.Bounds.Height - RowPx(e.Bounds, 12));
                 }
             }
 
-            DrawNavigationIcon(e.Graphics, new Rectangle(e.Bounds.Left + 9, e.Bounds.Top + (e.Bounds.Height - 16) / 2, 16, 16), "sheet", item.IsActive ? ColorExcelGreen : ColorTextSub);
+            DrawNavigationIcon(e.Graphics, new Rectangle(e.Bounds.Left + RowPx(e.Bounds, 9), e.Bounds.Top + (e.Bounds.Height - RowPx(e.Bounds, 16)) / 2, RowPx(e.Bounds, 16), RowPx(e.Bounds, 16)), "sheet", item.IsActive ? ColorExcelGreen : ColorTextSub);
             if (item.TabColor.HasValue)
             {
-                var stripe = new Rectangle(e.Bounds.Left + 27, e.Bounds.Top + (e.Bounds.Height - 16) / 2, 3, 16);
+                var stripe = new Rectangle(e.Bounds.Left + RowPx(e.Bounds, 27), e.Bounds.Top + (e.Bounds.Height - RowPx(e.Bounds, 16)) / 2, RowPx(e.Bounds, 3), RowPx(e.Bounds, 16));
                 using (var brush = new SolidBrush(item.TabColor.Value)) e.Graphics.FillRectangle(brush, stripe);
                 // Outline keeps white and pale tab colors visible on every row background.
                 using (var pen = new Pen(Color.FromArgb(180, 190, 184)))
@@ -1218,7 +1313,7 @@ namespace ExcelNavigatorPane
                 e.Graphics,
                 item.Name,
                 font,
-                new Rectangle(e.Bounds.Left + 32, e.Bounds.Top, e.Bounds.Width - 92, e.Bounds.Height),
+                new Rectangle(e.Bounds.Left + RowPx(e.Bounds, 32), e.Bounds.Top, e.Bounds.Width - RowPx(e.Bounds, 92), e.Bounds.Height),
                 ColorTextMain,
                 TextFormatFlags.VerticalCenter |
                 TextFormatFlags.Left |
@@ -1237,10 +1332,10 @@ namespace ExcelNavigatorPane
                 item.IsProtected ? "lock" : "unlock",
                 lockRect.Contains(_mouseLocWs));
             if (ReferenceEquals(item, _sheetDropTarget))
-                using (var pen = new Pen(ColorExcelGreen, 2))
+                using (var pen = new Pen(ColorExcelGreen, RowPx(e.Bounds, 2)))
                 {
-                    int y = _sheetDropAfter ? e.Bounds.Bottom - 2 : e.Bounds.Top + 1;
-                    e.Graphics.DrawLine(pen, 4, y, e.Bounds.Right - 4, y);
+                    int y = _sheetDropAfter ? e.Bounds.Bottom - RowPx(e.Bounds, 2) : e.Bounds.Top + RowPx(e.Bounds, 1);
+                    e.Graphics.DrawLine(pen, RowPx(e.Bounds, 4), y, e.Bounds.Right - RowPx(e.Bounds, 4), y);
                 }
         }
 
@@ -1253,22 +1348,22 @@ namespace ExcelNavigatorPane
 
         private static Rectangle GetWbCloseRect(Rectangle bounds)
         {
-            return new Rectangle(bounds.Right - 28, bounds.Top, 24, bounds.Height);
+            return new Rectangle(bounds.Right - RowPx(bounds, 28), bounds.Top, RowPx(bounds, 24), bounds.Height);
         }
 
         private static Rectangle GetWbCopyRect(Rectangle bounds)
         {
-            return new Rectangle(bounds.Right - 56, bounds.Top, 24, bounds.Height);
+            return new Rectangle(bounds.Right - RowPx(bounds, 56), bounds.Top, RowPx(bounds, 24), bounds.Height);
         }
 
         private static Rectangle GetWsEyeRect(Rectangle bounds)
         {
-            return new Rectangle(bounds.Right - 56, bounds.Top, 24, bounds.Height);
+            return new Rectangle(bounds.Right - RowPx(bounds, 56), bounds.Top, RowPx(bounds, 24), bounds.Height);
         }
 
         private static Rectangle GetWsLockRect(Rectangle bounds)
         {
-            return new Rectangle(bounds.Right - 28, bounds.Top, 24, bounds.Height);
+            return new Rectangle(bounds.Right - RowPx(bounds, 28), bounds.Top, RowPx(bounds, 24), bounds.Height);
         }
 
         private void LbWorkbooks_MouseMove(object sender, MouseEventArgs e)
@@ -1448,7 +1543,7 @@ namespace ExcelNavigatorPane
             { ClearSheetDropTarget(); return; }
             if (scroll)
             {
-                int direction = point.Y < 20 ? -1 : point.Y >= _lbWorksheets.ClientSize.Height - 20 ? 1 : 0;
+                int direction = point.Y < Px(20) ? -1 : point.Y >= _lbWorksheets.ClientSize.Height - Px(20) ? 1 : 0;
                 int rows = Math.Max(1, _lbWorksheets.ClientSize.Height / _lbWorksheets.ItemHeight);
                 int maximum = Math.Max(0, _lbWorksheets.Items.Count - rows);
                 _lbWorksheets.TopIndex = Math.Max(0, Math.Min(maximum, _lbWorksheets.TopIndex + direction));
@@ -1578,10 +1673,10 @@ namespace ExcelNavigatorPane
                 bool close = name == "close";
                 color = close ? Color.FromArgb(179, 38, 30) : ColorExcelGreen;
                 using (var brush = new SolidBrush(close ? Color.FromArgb(253, 235, 233) : ColorKutoolsActive))
-                    graphics.FillRectangle(brush, bounds.X + 1, bounds.Y + (bounds.Height - 22) / 2, bounds.Width - 2, 22);
+                    graphics.FillRectangle(brush, bounds.X + RowPx(bounds, 1), bounds.Y + (bounds.Height - RowPx(bounds, 22)) / 2, bounds.Width - RowPx(bounds, 2), RowPx(bounds, 22));
             }
             DrawNavigationIcon(graphics,
-                new Rectangle(bounds.X + (bounds.Width - 16) / 2, bounds.Y + (bounds.Height - 16) / 2, 16, 16), name, color);
+                new Rectangle(bounds.X + (bounds.Width - RowPx(bounds, 16)) / 2, bounds.Y + (bounds.Height - RowPx(bounds, 16)) / 2, RowPx(bounds, 16), RowPx(bounds, 16)), name, color);
         }
 
         private void ToggleWorkbookSort(WorkbookSortMode requested)

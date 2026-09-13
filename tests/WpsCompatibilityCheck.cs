@@ -443,6 +443,70 @@ class WpsCompatibilityCheck
         finally { Directory.Delete(folder,true); }
         Console.WriteLine("PASS: local/OneDrive rename, current content, preserved format, cancel/failure/read-only/missing-file guards, no overwrite, old-file cleanup and locked-file warning (offline)");
     }
+    static void CheckDpiLayout(Type type)
+    {
+        foreach(int dpi in new[]{96,120,144,192})
+        using(var pane=(Control)Activator.CreateInstance(type))
+        using(var form=new Form())
+        {
+            float scale=dpi/96f;
+            // Simulate point-font raster size on this test desktop; no global display/Office settings change.
+            foreach(var spec in new[]{new object[]{"_baseFont",9f,FontStyle.Regular},new object[]{"_titleFont",9f,FontStyle.Bold},
+                new object[]{"_countsFont",8.25f,FontStyle.Regular},new object[]{"_boldFont",9f,FontStyle.Bold}})
+            {
+                var old=type.GetField((string)spec[0],F).GetValue(pane) as Font;
+                if(dpi==96 && old!=null) continue;
+                Set(pane,(string)spec[0],new Font("Microsoft YaHei UI",(float)spec[1]*scale,(FontStyle)spec[2]));
+                if(old!=null)old.Dispose();
+            }
+            pane.Font=(Font)type.GetField("_baseFont",F).GetValue(pane);
+            foreach(string name in new[]{"_workbookHeading","_worksheetHeading"})
+                ((ToolStripItem)type.GetField(name,F).GetValue(pane)).Font=(Font)type.GetField("_titleFont",F).GetValue(pane);
+            foreach(string name in new[]{"_lblCounts","_updateLink","_updateDot"})
+                ((Control)type.GetField(name,F).GetValue(pane)).Font=(Font)type.GetField("_countsFont",F).GetValue(pane);
+            var search=(ToolStripTextBox)type.GetField("_txtFilter",F).GetValue(pane);search.Font=pane.Font;
+            var books=(ListBox)type.GetField("_lbWorkbooks",F).GetValue(pane);
+            var sheets=(ListBox)type.GetField("_lbWorksheets",F).GetValue(pane);
+            foreach(var entry in new[]{new[]{"WbItem","2026年08月工资表.xlsx"},new[]{"WsItem","OPS月度"},new[]{"WsItem","数据源"},new[]{"WsItem","备用隐藏表"}})
+            {
+                var itemType=type.GetNestedType(entry[0],F);var item=Activator.CreateInstance(itemType);
+                itemType.GetProperty("Name").SetValue(item,entry[1]);itemType.GetProperty("IsActive").SetValue(item,entry[1].StartsWith("OPS"));
+                (entry[0]=="WbItem" ? books : sheets).Items.Add(item);
+            }
+            ((Label)type.GetField("_lblCounts",F).GetValue(pane)).Text="34 张可见  ·  13 张隐藏";
+            Set(pane,"_manualWorkbookHeight",240);
+            form.AutoScaleMode=AutoScaleMode.None;form.ClientSize=new Size((int)(320*scale),(int)(600*scale));form.Controls.Add(pane);
+            form.StartPosition=FormStartPosition.Manual;form.Location=new Point(-30000,-30000);
+            SetWindowLong(form.Handle,-20,GetWindowLong(form.Handle,-20)|0x08000000);form.Show();Application.DoEvents();
+            Call(pane,"ApplyDpiMetrics",dpi);Application.DoEvents();
+            int row=(int)Math.Round(30*scale);
+            Require(books.ItemHeight==row && sheets.ItemHeight==row,"Both lists must scale their rows");
+            var bounds=new Rectangle(0,0,pane.Width,row);
+            var copy=(Rectangle)type.GetMethod("GetWbCopyRect",F).Invoke(null,new object[]{bounds});
+            var close=(Rectangle)type.GetMethod("GetWbCloseRect",F).Invoke(null,new object[]{bounds});
+            Require(copy.Width==(int)Math.Round(24*scale) && copy.Right<=close.Left && bounds.Contains(close),"Scaled click targets must not overlap");
+            var wb=(ToolStrip)type.GetField("_wbToolStrip",F).GetValue(pane);
+            Require(wb.ImageScalingSize.Width==(int)Math.Round(16*scale),"Toolbar image size must follow font scale");
+            Require(wb.Items.Cast<ToolStripItem>().Where(i=>i.Image!=null).All(i=>i.Image.Width==wb.ImageScalingSize.Width),"Toolbar vectors must rerender, not stretch old bitmaps");
+            int manual=(int)type.GetField("_manualWorkbookHeight",F).GetValue(pane);
+            Call(pane,"ApplyDpiMetrics",dpi);
+            Require(manual==(int)type.GetField("_manualWorkbookHeight",F).GetValue(pane),"Repeat scaling must preserve divider height");
+            string preview=Environment.GetEnvironmentVariable("EXCEL_NAVIGATOR_DPI_PREVIEW");
+            if(!string.IsNullOrEmpty(preview))
+            {
+                Directory.CreateDirectory(preview);
+                using(var bitmap=new Bitmap(pane.Width,pane.Height)) { pane.DrawToBitmap(bitmap,new Rectangle(Point.Empty,pane.Size));bitmap.Save(Path.Combine(preview,"dpi-"+dpi+".png")); }
+            }
+            form.ClientSize=new Size(240,(int)(600*scale));Application.DoEvents();Call(pane,"LayoutSheetCommands");
+            var toggle=(ToolStripButton)type.GetField("_btnToggleHidden",F).GetValue(pane);
+            var recent=(ToolStripButton)type.GetField("_btnRecentSheets",F).GetValue(pane);
+            Require(toggle.Bounds.Right<=recent.Bounds.Left,"Narrow toolbar actions must not collide");
+            Require(!string.IsNullOrWhiteSpace(toggle.ToolTipText) && !string.IsNullOrWhiteSpace(recent.ToolTipText),"Compact actions retain descriptions");
+            Call(pane,"ApplyDpiMetrics",96);Require(sheets.ItemHeight==30,"Returning to 100 percent restores base row height");
+            form.Hide();
+        }
+        Console.WriteLine("PASS: simulated 100/125/150/200 percent layout, sharp icon sizes, hit targets, divider preservation, narrow toolbars and scaling roundtrip");
+    }
     [STAThread]
     static int Main(string[] args)
     {
@@ -453,6 +517,7 @@ class WpsCompatibilityCheck
             var controlType = assembly.GetType("ExcelNavigatorPane.NavigationPaneControl");
             CheckWorkbookCopy(controlType);
             CheckWorkbookRename(controlType);
+            CheckDpiLayout(controlType);
             CheckWorksheetDrag(controlType);
             CheckUpdateUi(controlType);
             CheckWorksheetRefresh(controlType,addinType);
