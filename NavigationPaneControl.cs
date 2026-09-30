@@ -908,6 +908,7 @@ namespace ExcelNavigatorPane
                 "• 新建、打开、保存、关闭：使用行内按钮或工作簿区域右键菜单。\r\n" +
                 "• 重命名：右键工作簿选择重命名，保留原格式；验证新文件保存成功后删除旧文件。支持已同步到本机的 OneDrive 文件，不覆盖同名文件；云端同步由 OneDrive 完成。\r\n" +
                 "• 复制文件：点击关闭按钮前的复制图标，保存修改并复制原文件，可粘贴到支持文件的聊天或邮件客户端。OneDrive 文件被占用时，需关闭并等待保存完成。\r\n" +
+                "• 复制文件路径：右键工作簿选择此项，复制本机完整路径文本；不保存修改，OneDrive 文件使用本机同步路径。新工作簿需先保存。\r\n" +
                 "• 排序：在右键菜单选择名称升序或降序，再次点击恢复默认。\r\n\r\n" +
                 "工作表\r\n" +
                 "• 拖动排序：按住工作表名称，按插入线放到目标前后；普通隐藏表保持隐藏，深度隐藏表不移动。编辑中或结构受保护时不可移动。\r\n" +
@@ -1167,6 +1168,8 @@ namespace ExcelNavigatorPane
                 new ToolStripMenuItem("保存", null, (sender, args) => SaveWorkbook(_workbookMenuTarget)),
                 new ToolStripMenuItem("重命名...", null, (sender, args) => RenameWorkbook(_workbookMenuTarget)),
                 new ToolStripMenuItem("复制文件", null, (sender, args) => CopyWorkbookFile(_workbookMenuTarget)),
+                new ToolStripMenuItem("复制文件路径", null, (sender, args) => CopyWorkbookPath(_workbookMenuTarget))
+                    { ToolTipText = "复制本机完整路径，不保存或复制文件内容" },
                 new ToolStripMenuItem("关闭", null, (sender, args) => CloseWorkbook(_workbookMenuTarget))
             };
             return new ToolStripItem[]
@@ -1727,6 +1730,20 @@ namespace ExcelNavigatorPane
 
             workbook.Save();
             return true;
+        }
+
+        private void CopyWorkbookPath(Excel.Workbook workbook)
+        {
+            if (workbook == null) return;
+            RunUserAction("无法复制文件路径", () =>
+                Clipboard.SetText(GetWorkbookPathForClipboard(workbook), TextDataFormat.UnicodeText));
+        }
+
+        private static string GetWorkbookPathForClipboard(Excel.Workbook workbook)
+        {
+            if (string.IsNullOrWhiteSpace(workbook.Path))
+                throw new InvalidOperationException("新工作簿尚无文件路径，请先保存后再复制路径。");
+            return ResolveLocalWorkbookPath(workbook.FullName, ReadOneDriveMappings());
         }
 
         private void CopyWorkbookFile(Excel.Workbook workbook)

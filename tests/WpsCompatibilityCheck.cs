@@ -137,6 +137,18 @@ class WpsCompatibilityCheck
         var getFile=controlType.GetMethod("GetWorkbookFileForClipboard",F);
         var resolve=controlType.GetMethod("ResolveLocalWorkbookPath",F);
         var readable=controlType.GetMethod("CanReadWorkbookFile",F);
+        var getPath=controlType.GetMethod("GetWorkbookPathForClipboard",F);
+        string sourcePath=@"C:\文件夹\未保存修改 # 100%.xlsx";
+        bool firstSave=false;
+        object pathBook=Proxy(bookType,c => {
+            if(c.MethodName=="get_Path") return firstSave ? "" : Path.GetDirectoryName(sourcePath);
+            if(c.MethodName=="get_FullName") return sourcePath;
+            throw new Exception("Path copy must not save, activate or read workbook contents: "+c.MethodName);
+        });
+        Require((string)getPath.Invoke(null,new[]{pathBook})==sourcePath,"Path copy must return plain local path without saving edits or checking file locks");
+        firstSave=true;
+        try { getPath.Invoke(null,new[]{pathBook}); throw new Exception("Unsaved new workbook accepted"); }
+        catch(TargetInvocationException ex) { Require(ex.InnerException is InvalidOperationException,"New workbook needs a clear save-first message"); }
         string folder=Path.Combine(Path.GetTempPath(),"ExcelNavigatorOriginalCheck-"+Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(folder);
         string file=Path.Combine(folder,"Original # 100%.xlsm");
@@ -632,13 +644,14 @@ class WpsCompatibilityCheck
                 Call(control,"LbWorkbooks_MouseClick",workbookList,new MouseEventArgs(MouseButtons.Right,1,4,workbookList.GetItemRectangle(0).Top+4,0));
                 Require(menuOpenings == 1 && ReferenceEquals(controlType.GetField("_workbookMenuTarget",F).GetValue(control),book),"Right-click must bind to clicked workbook without activating it");
                 Require(activations.Count == 0,"Context menu must not switch workbooks");
+                Require(menu.Items.Cast<ToolStripItem>().Single(i=>i.Text=="复制文件路径").Available,"Workbook menu must offer path copy");
                 workbookList.SelectedIndex = 1;
                 menu.Items.Cast<ToolStripItem>().Single(i=>i.Text=="关闭").PerformClick();
                 Require(string.Join(",",activations)=="close-book","Item command must retain clicked target even if list selection changes");
                 activations.Clear();
                 Call(control,"LbWorkbooks_MouseClick",workbookList,new MouseEventArgs(MouseButtons.Right,1,4,workbookList.GetItemRectangle(1).Bottom+5,0));
                 Require(menuOpenings == 2 && controlType.GetField("_workbookMenuTarget",F).GetValue(control)==null,"Blank area must open a targetless menu");
-                foreach(string label in new[]{"保存","重命名...","复制文件","关闭"}) Require(!menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank area must hide target-specific actions");
+                foreach(string label in new[]{"保存","重命名...","复制文件","复制文件路径","关闭"}) Require(!menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank area must hide target-specific actions");
                 foreach(string label in new[]{"新建","打开...","排序","刷新列表","检查更新","功能说明"}) Require(menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank menu missing common action: "+label);
                 var headingStrip = (ToolStrip)controlType.GetField("_wbToolStrip",F).GetValue(control);
                 headingStrip.Items.Cast<ToolStripItem>().Single(i=>i.AccessibleName=="工作簿操作").PerformClick();
