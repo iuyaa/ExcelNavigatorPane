@@ -1,9 +1,20 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="Excel Navigator" Manufacturer="Excel Navigator" Version="$(var.MsiVersion)"
-           UpgradeCode="A14219F5-2541-441C-BAEC-606015D32B55" Scope="perMachine" Language="2052" Codepage="65001">
-    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的 Excel Navigator。" Schedule="afterInstallInitialize" />
+  <Package Name="Excel Navigator $(var.ReleaseVersion) payload" Manufacturer="Excel Navigator" Version="$(var.MsiVersion)"
+           UpgradeCode="4BCB8A50-9302-4E53-8829-F103215C070E" Scope="perMachine" Language="2052" Codepage="65001">
+    <!-- Only migrate the old flat layout. Versioned payloads coexist until explicit uninstall. -->
+    <Upgrade Id="A14219F5-2541-441C-BAEC-606015D32B55">
+      <UpgradeVersion Minimum="1.0.0" IncludeMinimum="yes" Property="LEGACY_PRODUCTS" />
+    </Upgrade>
+    <Upgrade Id="4BCB8A50-9302-4E53-8829-F103215C070E">
+      <UpgradeVersion Minimum="$(var.MsiVersion)" IncludeMinimum="no" OnlyDetect="yes" Property="NEWER_PAYLOAD" />
+    </Upgrade>
+    <InstallExecuteSequence><RemoveExistingProducts After="InstallInitialize" /></InstallExecuteSequence>
+    <Launch Condition="Installed OR NOT NEWER_PAYLOAD" Message="已安装更高版本，请使用 EXE 的恢复功能。" />
     <MediaTemplate EmbedCab="yes" />
     <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
+    <Property Id="EXCELNAV_SETUP" Secure="yes" />
+    <Launch Condition="EXCELNAV_SETUP = 1" Message="这是版本载荷包，请运行 ExcelNavigator-Setup EXE 完成安装或维护。" />
     <Property Id="REBOOT" Value="ReallySuppress" />
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
     <?if $(sys.BUILDARCH) = x86 ?>
@@ -23,34 +34,15 @@
     <Launch Condition="Installed OR VSTORUNTIME" Message="请先安装 VSTO Runtime，或运行 EXE 安装包自动安装依赖。" />
     <StandardDirectory Id="$(var.ProgramFiles)">
       <Directory Id="INSTALLFOLDER" Name="ExcelNavigatorPane">
-        <?include $(var.PayloadInclude) ?>
-        <Component Id="AddinRegistration" Guid="*">
-          <RegistryKey Root="HKLM" Key="Software\Microsoft\Office\Excel\Addins\ExcelNavigatorPane">
-            <RegistryValue Name="Description" Value="工作簿和工作表导航" Type="string" />
-            <RegistryValue Name="FriendlyName" Value="Excel Navigator" Type="string" />
-            <RegistryValue Name="LoadBehavior" Value="3" Type="integer" />
-            <RegistryValue Name="Manifest" Value="file:///[INSTALLFOLDER]ExcelNavigatorPane.vsto|vstolocal" Type="string" KeyPath="yes" />
-          </RegistryKey>
-        </Component>
-        <?if $(sys.BUILDARCH) = x64 ?>
-        <!-- The AnyCPU payload is shared by 64-bit Excel and 32-bit WPS. -->
-        <Component Id="AddinRegistration32" Guid="*" Bitness="always32">
-          <RegistryKey Root="HKLM" Key="Software\Microsoft\Office\Excel\Addins\ExcelNavigatorPane">
-            <RegistryValue Name="Description" Value="工作簿和工作表导航" Type="string" />
-            <RegistryValue Name="FriendlyName" Value="Excel Navigator" Type="string" />
-            <RegistryValue Name="LoadBehavior" Value="3" Type="integer" />
-            <RegistryValue Name="Manifest" Value="file:///[INSTALLFOLDER]ExcelNavigatorPane.vsto|vstolocal" Type="string" KeyPath="yes" />
-          </RegistryKey>
-        </Component>
-        <?endif ?>
+        <Directory Id="VERSIONSFOLDER" Name="Versions">
+          <Directory Id="VERSIONFOLDER" Name="$(var.ReleaseVersion)">
+            <?include $(var.PayloadInclude) ?>
+          </Directory>
+        </Directory>
       </Directory>
     </StandardDirectory>
     <Feature Id="Main" Title="Excel Navigator" Level="1">
       <ComponentGroupRef Id="PayloadComponents" />
-      <ComponentRef Id="AddinRegistration" />
-      <?if $(sys.BUILDARCH) = x64 ?>
-      <ComponentRef Id="AddinRegistration32" />
-      <?endif ?>
     </Feature>
   </Package>
 </Wix>

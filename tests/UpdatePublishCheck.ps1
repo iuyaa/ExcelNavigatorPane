@@ -1,6 +1,6 @@
-param(
+﻿param(
     [Parameter(Mandatory)][string]$Directory,
-    [string]$Version = '1.0.24.0',
+    [string]$Version = '1.0.29.0',
     [ValidateSet('oneview','github')][string]$UpdateChannel = 'oneview',
     [string]$Wix,
     [string]$Csc = 'F:\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\Roslyn\csc.exe'
@@ -32,7 +32,7 @@ foreach ($arch in @('x86','x64')) {
     $properties = @{}
     Read-Rows $db 'Property' @('Property','Value') | ForEach-Object { $properties[$_.Property] = $_.Value }
     Require ($properties.ProductVersion -eq ($Version -replace '\.0$','')) 'MSI version mismatch'
-    Require ($properties.UpgradeCode -eq '{A14219F5-2541-441C-BAEC-606015D32B55}') 'Upgrade family changed'
+    Require ($properties.UpgradeCode -eq '{4BCB8A50-9302-4E53-8829-F103215C070E}') 'Upgrade family changed'
     Require ($properties.ALLUSERS -eq '1') 'Must install per-machine'
     Require ($properties.REBOOT -eq 'ReallySuppress' -and $properties.MSIRESTARTMANAGERCONTROL -eq 'Disable') 'Must not restart Excel or Windows'
     $codes += $properties.ProductCode
@@ -41,30 +41,25 @@ foreach ($arch in @('x86','x64')) {
     $dirs = @(Read-Rows $db 'Directory' @('Directory','Directory_Parent','DefaultDir'))
     $expected = if ($arch -eq 'x64') { 'ProgramFiles64Folder' } else { 'ProgramFilesFolder' }
     Require (($dirs | Where-Object Directory -eq INSTALLFOLDER).Directory_Parent -eq $expected) 'Not a trusted Program Files installation'
-    $regs = @(Read-Rows $db 'Registry' @('Root','Key','Name','Value','Component_'))
-    $registrationCount = if ($arch -eq 'x64') { 2 } else { 1 }
-    Require ($regs.Count -eq 4 * $registrationCount -and @($regs | Where-Object { $_.Root -ne '2' -or $_.Key -ne 'Software\Microsoft\Office\Excel\Addins\ExcelNavigatorPane' }).Count -eq 0) 'Unexpected registry writes'
-    foreach ($group in ($regs | Group-Object Component_)) {
-        Require ($group.Count -eq 4) 'Incomplete host registration'
-        Require (($group.Group | Where-Object Name -eq Manifest).Value -eq 'file:///[INSTALLFOLDER]ExcelNavigatorPane.vsto|vstolocal') 'Manifest must load locally'
-        Require (($group.Group | Where-Object Name -eq LoadBehavior).Value -eq '#3') 'Wrong load behavior'
+    Require ($properties.ARPSYSTEMCOMPONENT -eq '1') 'Payload must not create a second visible uninstall entry'
+    Require ((($dirs | Where-Object Directory -eq VERSIONFOLDER).DefaultDir -split '\|')[-1] -eq $Version) 'Payload must use an immutable version folder'
+    $tables = @(Read-Rows $db '_Tables' @('Name'))
+    if (@($tables | Where-Object Name -eq Registry).Count) {
+        Require (@(Read-Rows $db 'Registry' @('Root','Key','Name','Value')).Count -eq 0) 'Payload MSI must not switch the Office selector'
     }
-    $component = Read-Rows $db 'Component' @('Component','Attributes') | Where-Object Component -eq AddinRegistration
-    Require ((([int]$component.Attributes -band 256) -ne 0) -eq ($arch -eq 'x64')) 'Wrong registry view'
-    if ($arch -eq 'x64') {
-        $compat = @(Read-Rows $db 'Component' @('Component','Attributes') | Where-Object Component -eq AddinRegistration32)
-        Require ($compat.Count -eq 1 -and ([int]$compat[0].Attributes -band 256) -eq 0) 'Missing 32-bit registration beside 64-bit registration'
-        $features = @(Read-Rows $db 'FeatureComponents' @('Feature_','Component_'))
-        Require (@($features | Where-Object { $_.Feature_ -eq 'Main' -and $_.Component_ -eq 'AddinRegistration32' }).Count -eq 1) '32-bit registration must participate in install and uninstall'
-    }
+    $components = @(Read-Rows $db 'Component' @('Component','Attributes'))
+    Require (@($components | Where-Object { ([int]$_.Attributes -band 16) -ne 0 }).Count -eq 0) 'Version retention must not strand permanent MSI components'
     $sequence = @{}
     Read-Rows $db 'InstallExecuteSequence' @('Action','Sequence') | ForEach-Object { $sequence[$_.Action] = [int]$_.Sequence }
     Require ($sequence.RemoveExistingProducts -gt $sequence.InstallInitialize -and $sequence.RemoveExistingProducts -lt $sequence.InstallFiles) 'Upgrade must remove old version within rollback transaction'
     $upgrade = @(Read-Rows $db 'Upgrade' @('UpgradeCode','VersionMin','VersionMax','Attributes','ActionProperty'))
-    Require (@($upgrade | Where-Object { $_.ActionProperty -eq 'WIX_DOWNGRADE_DETECTED' -and $_.VersionMin -eq $properties.ProductVersion }).Count -eq 1) 'Missing downgrade detection'
+    Require (@($upgrade | Where-Object { $_.ActionProperty -eq 'NEWER_PAYLOAD' -and $_.VersionMin -eq $properties.ProductVersion -and ([int]$_.Attributes -band 2) -ne 0 }).Count -eq 1) 'Missing newer payload detection'
+    Require (@($upgrade | Where-Object { $_.ActionProperty -eq 'LEGACY_PRODUCTS' -and $_.UpgradeCode -eq '{A14219F5-2541-441C-BAEC-606015D32B55}' -and ([int]$_.Attributes -band 2) -eq 0 }).Count -eq 1) 'Only legacy products may be removed'
+    Require (@($upgrade | Where-Object { $_.UpgradeCode -eq $properties.UpgradeCode -and ([int]$_.Attributes -band 2) -eq 0 }).Count -eq 0) 'Must preserve versioned products'
     $conditions = @(Read-Rows $db 'LaunchCondition' @('Condition','Description'))
     if ($arch -eq 'x86') { Require (@($conditions | Where-Object Condition -eq 'Installed OR NOT VersionNT64').Count -eq 1) '32-bit MSI must not omit the 64-bit host on 64-bit Windows' }
-    Require (@($conditions | Where-Object Condition -eq 'NOT WIX_DOWNGRADE_DETECTED').Count -eq 1) 'Missing downgrade rejection'
+    Require (@($conditions | Where-Object Condition -eq 'Installed OR NOT NEWER_PAYLOAD').Count -eq 1) 'Missing downgrade rejection'
+    Require (@($conditions | Where-Object Condition -eq 'EXCELNAV_SETUP = 1').Count -eq 1) 'Direct payload install must require setup orchestration'
     $session = $installer.OpenPackage($msi,1)
     # AppSearch only reads registry; never run InstallInitialize or INSTALL in this check.
     Require ($session.DoAction('AppSearch') -eq 1) 'Dependency search failed'
@@ -107,7 +102,7 @@ foreach ($arch in @('x86','x64')) {
 }
 Require ($codes[0] -ne $codes[1]) 'Architecture packages must have different ProductCodes'
 $check = Join-Path $work 'UpdateCheck.exe'
-& $Csc /nologo /target:exe /main:UpdateCheck /r:System.Net.Http.dll /r:System.Xml.Linq.dll /r:System.Windows.Forms.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll "/out:$check" "/resource:$repo\Properties\UpdateSettings.xml,ExcelNavigatorPane.UpdateSettings.xml" (Join-Path $repo 'UpdateChecker.cs') (Join-Path $repo 'installer\SetupLauncher.cs') (Join-Path $PSScriptRoot 'UpdateCheck.cs')
+& $Csc /nologo /target:exe /main:UpdateCheck /r:System.Net.Http.dll /r:System.Xml.Linq.dll /r:System.Windows.Forms.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Security.dll /r:System.Xml.Linq.dll "/out:$check" "/resource:$repo\Properties\UpdateSettings.xml,ExcelNavigatorPane.UpdateSettings.xml" (Join-Path $repo 'UpdateChecker.cs') (Join-Path $repo 'installer\SetupLauncher.cs') (Join-Path $repo 'installer\VersionedInstallation.cs') (Join-Path $PSScriptRoot 'UpdateCheck.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Update check compilation failed' }
 & $check $Directory (Join-Path $work 'x64\ExcelNavigatorPane.dll') $UpdateChannel
 if ($LASTEXITCODE -ne 0) { throw 'Update checks failed' }
@@ -118,7 +113,13 @@ if ($LASTEXITCODE -ne 0) { throw 'Host compatibility check compilation failed' }
 if ($LASTEXITCODE -ne 0) { throw 'Host compatibility check failed' }
 Write-Output "PASS: offline packaging checks. Real install/load/upgrade/uninstall: NOT_RUN. Evidence: $work"
 $migrationCheck = Join-Path $work 'RegistrationMigrationCheck.exe'
-& $Csc /nologo /target:exe /main:RegistrationMigrationCheck /r:System.Windows.Forms.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll "/out:$migrationCheck" (Join-Path $repo 'installer\SetupLauncher.cs') (Join-Path $PSScriptRoot 'RegistrationMigrationCheck.cs')
+& $Csc /nologo /target:exe /main:RegistrationMigrationCheck /r:System.Windows.Forms.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll /r:System.Security.dll /r:System.Xml.Linq.dll "/out:$migrationCheck" (Join-Path $repo 'installer\SetupLauncher.cs') (Join-Path $repo 'installer\VersionedInstallation.cs') (Join-Path $PSScriptRoot 'RegistrationMigrationCheck.cs')
 if ($LASTEXITCODE -ne 0) { throw 'Registration migration check compilation failed' }
 & $migrationCheck
 if ($LASTEXITCODE -ne 0) { throw 'Registration migration check failed' }
+
+$versionCheck = Join-Path $work 'VersionedInstallationCheck.exe'
+& $Csc /nologo /target:exe /r:System.Security.dll /r:System.Xml.Linq.dll "/out:$versionCheck" (Join-Path $repo 'installer\VersionedInstallation.cs') (Join-Path $PSScriptRoot 'VersionedInstallationCheck.cs')
+if ($LASTEXITCODE -ne 0) { throw 'Versioned installation check compile failed' }
+& $versionCheck (Join-Path $work 'x64') (Join-Path $Directory 'update-public-key.xml') $Version
+if ($LASTEXITCODE -ne 0) { throw 'Versioned installation checks failed' }

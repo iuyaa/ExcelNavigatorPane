@@ -13,6 +13,7 @@ using System.Threading.Tasks;
 using System.Threading;
 using System.Xml;
 using System.Xml.Linq;
+using Microsoft.Win32;
 
 namespace ExcelNavigatorPane
 {
@@ -104,6 +105,38 @@ namespace ExcelNavigatorPane
         }
 
         internal static Version CurrentVersion => Version.Parse((string)ReadSettings().Attribute("version"));
+
+        internal static Version ReadInstalledVersion()
+        {
+            try
+            {
+                using (var machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine,
+                    Environment.Is64BitOperatingSystem ? RegistryView.Registry64 : RegistryView.Registry32))
+                using (var state = machine.OpenSubKey(@"Software\ExcelNavigatorPane\Installation"))
+                {
+                    Version version;
+                    return Version.TryParse(Convert.ToString(state?.GetValue("CurrentVersion")), out version) ? version : null;
+                }
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException || ex is System.Security.SecurityException || ex is IOException)
+            { return null; }
+        }
+
+        internal static string InstalledMaintenancePath()
+        {
+            var version = ReadInstalledVersion();
+            if (version == null || version.Revision != 0) throw new InvalidOperationException("尚未安装新版维护程序。");
+            using (var machine = RegistryKey.OpenBaseKey(RegistryHive.LocalMachine,
+                Environment.Is64BitOperatingSystem ? RegistryView.Registry64 : RegistryView.Registry32))
+            using (var windows = machine.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion"))
+            {
+                string programFiles = Convert.ToString(windows?.GetValue("ProgramFilesDir"));
+                if (!Path.IsPathRooted(programFiles)) throw new InvalidDataException("维护程序目录无效。");
+                string path = Path.Combine(programFiles, "ExcelNavigatorPane", "Maintenance", version.ToString(), "ExcelNavigator-Setup.exe");
+                if (!File.Exists(path)) throw new FileNotFoundException("维护程序缺失，请重新运行 EXE 安装包。");
+                return path;
+            }
+        }
 
         internal static Uri ParseAddress(string address, string channel = "oneview")
         {

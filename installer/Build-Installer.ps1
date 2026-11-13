@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.0.24.0',
+    [string]$Version = '1.0.29.0',
     [ValidateSet('oneview','github')][string]$UpdateChannel = 'oneview',
     [string]$ChannelsFile = (Join-Path $PSScriptRoot 'UpdateChannels.json'),
     [string]$UpdateBaseUrl,
@@ -102,7 +102,7 @@ foreach ($arch in @('x86','x64')) {
     $folder = Join-Path $payload $arch; New-Item -ItemType Directory $folder -Force | Out-Null
     $msiName = "ExcelNavigator-$Version-$arch.msi"; $msi = Join-Path $folder $msiName
     $programFiles = if ($arch -eq 'x64') { 'ProgramFiles64Folder' } else { 'ProgramFilesFolder' }
-    & $Wix build (Join-Path $PSScriptRoot 'Product.wxs') $groups -arch $arch -d "MsiVersion=$($parsed.Major).$($parsed.Minor).$($parsed.Build)" -d "ProgramFiles=$programFiles" -d "PayloadInclude=$include" -o $msi
+    & $Wix build (Join-Path $PSScriptRoot 'Product.wxs') $groups -arch $arch -d "MsiVersion=$($parsed.Major).$($parsed.Minor).$($parsed.Build)" -d "ReleaseVersion=$Version" -d "ProgramFiles=$programFiles" -d "PayloadInclude=$include" -o $msi
     if ($LASTEXITCODE -ne 0) { throw "MSI build failed: $arch" }
     & $MSBuild (Join-Path $PSScriptRoot 'Bootstrapper.proj') /t:Build "/p:BootstrapOutput=$folder" "/p:BootstrapperPath=$BootstrapperPath" /nologo /verbosity:minimal
     if ($LASTEXITCODE -ne 0 -or !(Test-Path (Join-Path $folder 'setup.exe'))) { throw 'Microsoft prerequisite bootstrapper failed.' }
@@ -119,7 +119,9 @@ foreach ($arch in @('x86','x64')) {
 $versionSource = Join-Path $stage 'InstallerVersion.cs'
 "[assembly: System.Reflection.AssemblyVersion(`"$Version`")]`n[assembly: System.Reflection.AssemblyFileVersion(`"$Version`")]" | Set-Content $versionSource -Encoding utf8
 $exe = Join-Path $dist "ExcelNavigator-Setup-$Version.exe"
-& "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe" /nologo /target:winexe /platform:anycpu /optimize+ /r:System.Windows.Forms.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll "/resource:$payloadZip,payload.zip" "/out:$exe" (Join-Path $PSScriptRoot 'SetupLauncher.cs') $versionSource
+$installerKey = Join-Path $stage 'update-public-key.xml'
+$rsa.ToXmlString($false) | Set-Content $installerKey -Encoding utf8
+& "$env:WINDIR\Microsoft.NET\Framework\v4.0.30319\csc.exe" /nologo /target:winexe /platform:anycpu /optimize+ /r:System.Windows.Forms.dll /r:System.Security.dll /r:System.Xml.Linq.dll /r:System.IO.Compression.dll /r:System.IO.Compression.FileSystem.dll "/resource:$payloadZip,payload.zip" "/resource:$installerKey,update-public-key.xml" "/out:$exe" (Join-Path $PSScriptRoot 'SetupLauncher.cs') (Join-Path $PSScriptRoot 'VersionedInstallation.cs') $versionSource
 if ($LASTEXITCODE -ne 0) { throw 'EXE launcher build failed.' }
 $signature = Set-AuthenticodeSignature -LiteralPath $exe -Certificate $certificate -HashAlgorithm SHA256
 if ($signature.SignerCertificate.Thumbprint -ne $certificate.Thumbprint) { throw 'EXE signature missing.' }

@@ -167,6 +167,9 @@ class UpdateCheck
             catch (OperationCanceledException) { cancelled = true; }
             Require(cancelled);
             Require(SetupLauncher.InstallationResultMessage(0).Contains("安装成功"));
+            Require(SetupLauncher.InstallationResultMessage(0).Contains("当前 Excel/WPS 窗口可以继续使用"));
+            Require(SetupLauncher.PendingPathsAffect(@"C:\Program Files\ExcelNavigatorPane",new[]{@"\??\C:\Program Files\ExcelNavigatorPane\Versions\1.0.27.0\ExcelNavigatorPane.dll",""}));
+            Require(!SetupLauncher.PendingPathsAffect(@"C:\Program Files\ExcelNavigatorPane",new[]{@"\??\C:\Program Files\ExcelNavigatorPaneOther\file.dll"}));
             Require(SetupLauncher.InstallationResultMessage(1602) == null);
             Require(SetupLauncher.InstallationResultMessage(3010).Contains("重启"));
             Require(SetupLauncher.InstallationResultMessage(1641).Contains("重启"));

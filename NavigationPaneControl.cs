@@ -363,6 +363,7 @@ namespace ExcelNavigatorPane
             _updateTimer.Tick += (sender, args) =>
             {
                 _updateTimer.Interval = 60000;
+                RefreshUpdateStatus();
                 CheckUpdates(false);
             };
             _updateTimer.Start();
@@ -620,7 +621,12 @@ namespace ExcelNavigatorPane
             var help = new ToolStripMenuItem("功能说明");
             _checkUpdates = new ToolStripMenuItem("检查更新") { ToolTipText = "后台检查新版本，点击更新提示查看变化" };
             _checkUpdates.Click += (sender, args) => CheckUpdates(true);
-            _workbookContextMenu.Items.AddRange(new ToolStripItem[] { new ToolStripSeparator(), _checkUpdates, help });
+            var restoreVersion = new ToolStripMenuItem("恢复上一版…", null, (sender, args) => RunUserAction("无法启动版本恢复", () =>
+            {
+                using (var process = Process.Start(new ProcessStartInfo(UpdateChecker.InstalledMaintenancePath(), "--restore") { UseShellExecute = true }))
+                    if (process == null) throw new InvalidOperationException("维护程序未启动。");
+            })) { ToolTipText = "打开维护程序恢复上一版；当前窗口保持原样，重开后生效" };
+            _workbookContextMenu.Items.AddRange(new ToolStripItem[] { new ToolStripSeparator(), _checkUpdates, restoreVersion, help });
             var newWorkbook = new ToolStripButton { Image = CreateToolbarIcon("add"), DisplayStyle = ToolStripItemDisplayStyle.Image,
                 ToolTipText = "新建工作簿", AccessibleName = "新建工作簿", Alignment = ToolStripItemAlignment.Right };
             newWorkbook.Click += (sender, args) => NewWorkbook();
@@ -781,6 +787,12 @@ namespace ExcelNavigatorPane
                 Cursor = Cursors.Hand, AccessibleName = "有新版本，点击查看更新" };
             _updateLink.LinkClicked += (sender, args) =>
             {
+                var installed = UpdateChecker.ReadInstalledVersion();
+                if (installed != null && installed != UpdateChecker.CurrentVersion)
+                {
+                    if (IsReadyForCommands()) ShowInformation("当前运行 v" + UpdateChecker.CurrentVersion + "，已安装 v" + installed + "。\n当前窗口可以继续使用，全部退出 Excel/WPS 后重新打开即可生效。");
+                    return;
+                }
                 if (_availableUpdate == null) CheckUpdates(true);
                 else ShowUpdateDetails(_availableUpdate);
             };
@@ -881,13 +893,23 @@ namespace ExcelNavigatorPane
 
         private void RefreshUpdateStatus()
         {
+            SetUpdateStatus(UpdateChecker.ReadInstalledVersion());
+        }
+
+        private void SetUpdateStatus(Version installed)
+        {
             bool downloading = UpdateChecker.DownloadInProgress;
+            bool pending = installed != null && installed != UpdateChecker.CurrentVersion;
+            _updateLink.Text = "v" + UpdateChecker.CurrentVersion + (pending ? " · 待生效" : "");
+            using (var graphics = CreateGraphics())
+                _updateLink.Width = TextRenderer.MeasureText(graphics, _updateLink.Text, _countsFont).Width + Px(8);
             _updateLink.Enabled = _updateDot.Enabled = _checkUpdates.Enabled = !downloading;
             _checkUpdates.Text = downloading ? "正在下载安装包…" : "检查更新";
             _updateDot.Visible = _availableUpdate != null;
             string hint = downloading ? "正在下载安装包…" : _availableUpdate == null
                 ? "当前版本：" + UpdateChecker.CurrentVersion + "；点击检查更新"
                 : "当前版本：" + UpdateChecker.CurrentVersion + "；发现新版 v" + _availableUpdate.Version + "，点击查看更新内容";
+            if (pending) hint = "当前运行 v" + UpdateChecker.CurrentVersion + "；已安装 v" + installed + "，全部退出 Excel/WPS 后重新打开即可生效。";
             _updateLink.AccessibleDescription = hint;
             _workbookToolTip.SetToolTip(_updateLink, hint);
             _workbookToolTip.SetToolTip(_updateDot, hint);
@@ -927,6 +949,7 @@ namespace ExcelNavigatorPane
                 "• 滚轮：鼠标位于工作簿或工作表列表时滚动对应列表，单元格编辑时也无需退出编辑。\r\n\r\n" +
                 "布局与使用提示\r\n" +
                 "• 拖动分隔线调整工作簿区高度，双击恢复自动高度。\r\n" +
+                "• 更新：首次迁移旧安装时需关闭 Excel/WPS，后续安装可继续工作；版本号旁的“待生效”表示已安装另一版本，全部退出后重开即可加载。右键菜单“恢复上一版”可打开维护程序，保留当前工作。\r\n" +
                 "• 工作簿区域空白处也可右键打开菜单。\r\n" +
                 "• WPS 编辑或忙碌时暂不支持导航切换；Excel 的公式编辑导航受原生窗口和标签可用性限制。\r\n" +
                 "• 后台每六小时检查更新，有新版时在底部版本号后显示红点；点击版本号查看更新内容，确认后才下载。", false))
@@ -960,7 +983,7 @@ namespace ExcelNavigatorPane
                 if (update)
                 {
                     actions.Controls.Add(new Button { Text = "下载并安装", DialogResult = DialogResult.OK, Width = 112, Height = 30 });
-                    var hint = new Label { Text = "安装前请保存工作并关闭 Excel / WPS。", Dock = DockStyle.Bottom,
+                    var hint = new Label { Text = "首次迁移需关闭 Excel/WPS；后续更新可继续工作，重开后生效。", Dock = DockStyle.Bottom,
                         Height = 28, Padding = new Padding(18, 0, 0, 0), ForeColor = ColorTextSub };
                     Controls.Add(bodyPanel);
                     Controls.Add(hint);
@@ -1001,7 +1024,7 @@ namespace ExcelNavigatorPane
                     using (var installer = Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }))
                         if (installer == null) throw new InvalidOperationException("安装程序未启动。");
                     installerStarted = true;
-                    message = "安装程序已打开。请先保存工作，再关闭 Excel 和 WPS 表格，按安装窗口提示继续。";
+                    message = "安装程序已打开。首次迁移请按提示保存并关闭 Excel/WPS；后续更新可继续工作，重开后生效。";
                 }
                 catch (Exception ex)
                 {

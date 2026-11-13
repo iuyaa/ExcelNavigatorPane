@@ -6,7 +6,7 @@ ExcelNavigatorPane 是一个基于 VSTO、WinForms 与 Excel Interop 的 Excel �
 
 ### 版本、更新与功能说明
 
-- 导航栏底部同一行显示工作表数量与当前版本；“功能说明”保留在工作簿区域右键菜单中，指南随插件内置，离线可读。
+- 导航栏底部同一行显示工作表数量与当前运行版本；安装了另一版本时追加“待生效”，点击可查看已安装版本；“功能说明”保留在工作簿区域右键菜单中，指南随插件内置，离线可读。
 - 初始化后延迟 15 秒检查更新，此后同一加载进程每六小时检查一次；多个窗格共享请求和结果。自动检查不弹窗、不访问 Office 对象，失败保持安静，已有新版提示不会因临时失败消失。
 - 发现新版在当前版本号后显示红点，点击版本号或红点阅读更新内容；只有确认“下载并安装”才下载。菜单“检查更新”可立即手动重试。
 - 打包从 `CHANGELOG.md` 提取截至目标版本的日志，通过 `latest.xml` 的 `notes` 与 `notesSignature` 属性分发和校验，原安装包签名协议保持兼容。日志按版本分段，可用“新增功能、体验优化、问题修复”三级标题分类，无内容的分类不添加；缺失或无效的说明不影响独立校验安装包。
@@ -74,7 +74,7 @@ ExcelNavigatorPane 是一个基于 VSTO、WinForms 与 Excel Interop 的 Excel �
 
 用户已确认本机 WPS 表格曾能自动加载此插件；1.0.3.0 修复 64 位 Excel 与 32 位 WPS 共存时新版注册缺失。用户反馈 WPS 切换与重复窗格问题初测已解决。本版针对该环境增加工作簿 COM 切换、同一主窗口复用导航栏和关闭后的清理；不同主窗口仍分别管理导航栏，Excel 的每窗口独立行为保留。
 
-WPS 就绪状态使用宿主的 Ready 属性，编辑或忙碌时拒绝切换；Excel 原有公式编辑导航不变。WPS 公式编辑导航尚未适配，真实 WPS/Excel 点击回归为 **NOT_RUN**。安装器按 Windows 位数选择 MSI；64 位 Windows 同时注册 32/64 位加载项，只有 WPS 的电脑安装尚未适配。升级前必须保存并关闭 Excel 与 WPS 表格。
+WPS 就绪状态使用宿主的 Ready 属性，编辑或忙碌时拒绝切换；Excel 原有公式编辑导航不变。WPS 公式编辑导航尚未适配，真实 WPS/Excel 点击回归为 **NOT_RUN**。安装器按 Windows 位数选择 MSI；64 位 Windows 同时注册 32/64 位加载项，只有 WPS 的电脑安装尚未适配。首次迁移旧安装仍须保存并关闭 Excel 与 WPS；迁移后的常规更新允许当前窗口继续使用。
 
 `tests/WpsCompatibilityCheck.cs` 使用测试进程自己的隐藏窗口和 COM 接口替身，覆盖窗格复用、创建重入、跨主窗口隔离、关闭后的清理、两种宿主取消隐藏的激活顺序，以及忙碌时禁止 COM 切换；已纳入 `tests/UpdatePublishCheck.ps1`。
 
@@ -128,22 +128,28 @@ msbuild .\ExcelNavigatorPane.csproj /t:Rebuild /p:Configuration=Debug /p:Platfor
 
 ### EXE 安装包（内含 MSI）
 
-以下命令生成 `dist/releases/1.0.24.0/渠道/ExcelNavigator-Setup-1.0.24.0.exe`。用户只需一个 EXE，无需 Visual Studio。EXE 检查桌面 Excel 已安装后，按 Windows 位数选择内置 MSI；64 位包同时注册 32/64 位宿主，共享 AnyCPU 插件；缺少 .NET Framework 4.8 或 VSTO Runtime 时由微软引导程序下载依赖。
+以下命令生成 `dist/releases/1.0.29.0/渠道/ExcelNavigator-Setup-1.0.29.0.exe`。用户只需一个 EXE，无需 Visual Studio。EXE 检查桌面 Excel 已安装后，按 Windows 位数选择内置 MSI；64 位包同时注册 32/64 位宿主，共享 AnyCPU 插件；缺少 .NET Framework 4.8 或 VSTO Runtime 时由微软引导程序下载依赖。
+
+1.0.27.0、1.0.28.0 为未发布的本地测试包。用户已验证 Excel 从 1.0.27.0 保持运行安装 1.0.28.0、显示“待生效”、退出重开加载新版。1.0.29.0 延续该安装结构；WPS 与独立电脑验收仍待执行，按预发布提供。
 
 ```powershell
 # 一次性准备 WiX 构建工具；用户电脑不需要 WiX
 dotnet tool install wix --version 4.0.6 --tool-path work/tools/wix
-./installer/Build-Installer.ps1 -Version 1.0.24.0 -UpdateChannel oneview
-./installer/Build-Installer.ps1 -Version 1.0.24.0 -UpdateChannel github
+./installer/Build-Installer.ps1 -Version 1.0.29.0 -UpdateChannel oneview
+./installer/Build-Installer.ps1 -Version 1.0.29.0 -UpdateChannel github
 ```
 
-安装前保存工作并关闭所有 Excel 与 WPS 表格。MSI 需要管理员授权，将加载项安装到对应的 Program Files 目录，并写入 HKLM 加载项注册（64 位 Windows 同时写入 32/64 位视图），使用 `|vstolocal` 从本地加载。正常 Windows/VSTO 策略下，这条安装方式使用 Program Files 的信任机制，不需要用户导入自签名根证书。EXE 仍可能显示未知发布者或 Windows 安全提示，公司策略也可能限制安装。
+首次迁移旧的平铺 MSI 安装、同版本修复、安装缺失运行环境和卸载时，仍需保存并关闭全部 Excel/WPS。迁移后的更新将文件写入 `Program Files/ExcelNavigatorPane/Versions/版本号`，保留已加载的旧版，不自动关闭宿主或保存工作。普通安装需要管理员授权。新的宿主进程加载新版本，打开工作簿可能复用现有旧进程；全部退出后重开才能确保所有窗口生效。
 
-从 1.0.0.2 及更早版本迁移时，先在“程序和功能”卸载旧 ClickOnce 版本，再运行新 EXE。开发机的 HKCU 开发版注册也会覆盖 HKLM 注册，必须先取消开发版注册；EXE 检测到旧注册会停止并说明原因，不自动删除注册或源文件。不要直接删除开发项目目录。其他 Windows 用户已有的 ClickOnce 注册需分别处理。
+签名清单、依赖文件 SHA256 与版本通过校验后，EXE 才切换 HKLM 的 Office 加载入口（64 位 Windows 同时处理 32/64 位视图）。切换前保存持久恢复记录；部分写入失败或下次维护发现未完成事务时恢复旧值，检测到其他程序修改则停止并保留记录。首次迁移还会把签名有效的旧版复制到版本目录，以覆盖旧 MSI 已卸载、入口切换却失败的情况。正常 Windows/VSTO 策略下继续使用 Program Files 的信任机制，不导入自签名根证书；Windows 或公司策略仍可能限制安装。
 
-MSI 版后续升级直接运行新版 EXE，Windows Installer 负责替换旧版；拒绝降级，升级失败时通过安装事务恢复旧版。控制面板中使用“Excel Navigator”卸载。安装源按版本保存在 `%LOCALAPPDATA%/ExcelNavigatorPane/Installer/版本号`，供修复使用，安装期间不要清理。
+从旧 ClickOnce 迁移仍需先卸载其用户安装。开发版注册继续按原规则提示备份迁移；属于本安装目录的重复 HKCU 注册只在管理员安装成功后备份移除，取消 UAC 不移除此类注册。未知用户注册不会自动删除。其他 Windows 用户的旧 ClickOnce 注册需分别处理。
 
-安装器先准备运行环境，再等待 MSI 安装结束；仅成功时显示“Excel Navigator 安装成功”，需要重启时明确提示。取消或失败不会显示成功提示。保存并关闭 Excel/WPS 的提醒窗口标题统一为“Excel Navigator”。
+每个版本的 MSI 只管理该版本文件，并隐藏自身的卸载条目；只有旧平铺安装参与迁移卸载，其他版本载荷互不移除。**用户和 IT 均应运行 EXE，附带 MSI 是载荷包，直接安装会被拒绝，不能绕过 EXE 的校验和入口切换。**
+
+工作簿区域右键菜单“恢复上一版…”打开维护程序，确认管理员授权后切换到已保留且校验有效的上一版；当前进程不热切换。也可在“程序和功能”的 Excel Navigator 条目使用“更改”恢复或“卸载”统一移除版本载荷。卸载仍要求关闭全部 Excel/WPS，并最后移除当前活动版本；失败可重试。维护程序正在运行时无法删除自身，退出后可手动清理残留维护缓存。
+
+安装源保存在 `Program Files/ExcelNavigatorPane/Installer/版本号`，维护 EXE 保存在 `Maintenance/版本号`。为保证跨用户进程和恢复安全，目前保留全部版本载荷，统一卸载时清理；不在更新时猜测某个旧版是否仍被其他进程使用。普通安装拒绝降级，恢复必须走显式恢复入口。不承诺自动识别并恢复 VSTO 启动失败。
 
 脚本复用当前用户证书库中的现有发布证书；可显式传入 `-CertificateThumbprint`。更新签名的公钥已固定在已安装插件中，换用不同密钥会导致旧客户端拒绝新清单，不能隐式轮换。打包不导入 Root/TrustedPublisher，不修改开发签名配置；`BuildInstaller=true` 跳过 VSTO 默认的开发注册步骤。
 
@@ -152,19 +158,19 @@ MSI 版后续升级直接运行新版 EXE，Windows Installer 负责替换旧版
 - 工作簿菜单“检查更新”读取固定 HTTPS `latest.xml`，最多等待 10 秒；“关于导航栏”显示安装版本。
 - 清单包含版本、相对 EXE 路径、SHA-256 和 RSA-SHA256 签名。插件使用内置公钥验证签名，拒绝篡改、外站路径、非 HTTPS、重定向和错误产品。
 - 发现新版后询问是否下载，确认后自动保存到系统临时目录下的 `ExcelNavigatorPane\Updates`（通过 `Path.GetTempPath()` 获取，通常为 `%TEMP%\ExcelNavigatorPane\Updates`），不再弹出另存为窗口；下载最长 2 分钟、最多 128 MiB。文件哈希通过后才替换同版本目标文件，失败会清理临时文件并保留原文件。
-- 用户确认下载后，安装包校验通过便自动打开。安装器检测到 Excel 或 WPS 表格运行时，提示先保存工作、关闭所有窗口，再点击“重试”继续；点击“取消”退出安装。自动打开失败时提示文件路径供手动运行，不强制退出或重启 Excel/WPS；不在启动时自动检查。
+- 用户确认下载后，安装包校验通过便自动打开。首次迁移、缺失依赖或卸载时提示关闭 Excel/WPS；常规更新无需关闭，成功后新进程加载新版。版本号旁显示“待生效”时，点击可查看运行版本和已安装版本。自动打开失败时提示文件路径供手动运行，不强制退出或重启 Excel/WPS；后台检查沿用顶部所述的延迟检查与缓存。
 - 开发构建未配置更新地址时不发起网络请求。正式打包默认使用 `https://oneview.jiarui.net.cn/excel-navigation/`，可用 `-UpdateBaseUrl` 指定其他固定 HTTPS 目录。
-- 旧 ClickOnce 根入口和旧文件继续保留；本版不会通过旧 `.vsto` 入口迁移用户，需要首次手工安装 MSI 版。
+- 旧 ClickOnce 根入口和旧文件继续保留；本版不会通过旧 `.vsto` 入口迁移用户，需要首次手工运行 EXE 迁移。
 
 本地检查：
 
 ```powershell
-./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.24.0/oneview -Version 1.0.24.0 -UpdateChannel oneview
-./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.24.0/github -Version 1.0.24.0 -UpdateChannel github
+./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.29.0/oneview -Version 1.0.29.0 -UpdateChannel oneview
+./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.29.0/github -Version 1.0.29.0 -UpdateChannel github
 python tests/RustFSPublishCheck.py
 ```
 
-这些检查只解包和读取 MSI 表/依赖注册，不执行安装。覆盖两种位数、Program Files/HKLM 注册、升级事务和降级条件、负载哈希、更新清单签名及篡改拒绝、发布顺序和冲突保护。无开发环境电脑上的首次安装、Excel 加载、真实升级/回滚/卸载为 **NOT_RUN**；真实 Excel 验证必须使用 `/x` 新建独立进程。
+`UpdatePublishCheck.ps1` 只解包和读取正式 MSI，另在唯一测试注册子树中验证入口事务，包含独立测试子进程崩溃恢复；不安装正式产品。`VersionedMsiCheck.ps1 -Fixtures <VersionedInstallationCheck 输出目录>` 则把正式 WiX 模板改为唯一 per-user 测试身份和目录，实际验证迁移、占用旧 DLL 时共存、降级拒绝、失败回滚及清理。两者均不写正式 Office 注册。本机 Excel 的保留窗口升级已由用户验证；无开发环境电脑迁移、WPS 升级、真实恢复/卸载为 **NOT_RUN**。Agent 的真实 Excel 调试必须使用 `/x` 新建独立进程。
 
 ### 发布流程
 
@@ -174,20 +180,20 @@ python tests/RustFSPublishCheck.py
 - `github`：读取公开仓库 `releases.atom`，选择其中最高版本（包含预发布），再下载对应标签的 `latest.xml` 和 EXE；仅允许 GitHub 和其 Release 资源域名的 HTTPS 重定向。私有仓库不能用于匿名客户端更新。
 - 安装包保留构建时选定的渠道。1.0.9 及更早的包均继续走 OneView，即便最初是从 GitHub 下载的；要转为 GitHub 渠道，安装一次 GitHub 渠道的新版本。不要用同版本安装包切换渠道，MSI 可能拒绝同版本替换。
 
-1.0.24.0 为内部预发布版本，完整真实升级验收尚未完成，普通修改不自动发布。用户要求“发布”时完成以下全部步骤，更新日志维护在 [CHANGELOG.md](CHANGELOG.md)：
+1.0.29.0 为内部预发布，Excel 本机升级链路已验证，独立电脑与 WPS 验收尚未完成。普通修改不自动发布。用户要求“发布”时完成以下全部步骤，更新日志维护在 [CHANGELOG.md](CHANGELOG.md)：
 
-1. 确定递增版本号并整理更新日志，同步 `Properties/UpdateSettings.xml` 和 `Properties/AssemblyInfo.cs` 的 `AssemblyFileVersion`，避免 MSI 因 DLL 文件版本未增长而跳过替换。采用 `主.次.构建.0`，最后一段必须为 0；MSI 只比较前三段（最大分别为 255、255、65535）。下一版例如 1.0.25.0。
+1. 确定递增版本号并整理更新日志，同步 `Properties/UpdateSettings.xml` 和 `Properties/AssemblyInfo.cs` 的 `AssemblyFileVersion`，避免 MSI 因 DLL 文件版本未增长而跳过替换。采用 `主.次.构建.0`，最后一段必须为 0；MSI 只比较前三段（最大分别为 255、255、65535）。后续版本须继续递增。
 2. 完成相关检查，提交源码与日志并推送 GitHub；排除凭据、私钥、生成物和无关本地修改。
 3. 从该提交分别用 `-UpdateChannel oneview`、`-UpdateChannel github` 构建，沿用同一发布证书。两个渠道版本号及源码相同，但嵌入的渠道配置不同，EXE 哈希及签名清单也不同，不得混用。对各自产物运行 `tests/UpdatePublishCheck.ps1 -Directory dist/releases/版本号/渠道 -Version 版本号 -UpdateChannel 渠道`，创建并推送指向同一提交的 `v版本号` 标签。
-4. 创建 GitHub Release 草稿，上传 **github 目录**内的 EXE、SHA-256、x86/x64 MSI、安装说明、`latest.xml` 和 `update-public-key.xml`。用户默认下载 EXE；MSI 供具备运行环境的 IT 部署使用，必须选择 Windows 对应位数，先关闭 Excel、卸载旧 ClickOnce。
+4. 创建 GitHub Release 草稿，上传 **github 目录**内的 EXE、SHA-256、x86/x64 MSI、安装说明、`latest.xml` 和 `update-public-key.xml`。用户和 IT 均使用 EXE；附件 MSI 为该 EXE 的版本载荷，禁止单独安装或手工切换注册。
 5. 将 **oneview 目录**的产物上传 RustFS：先上传并校验 `releases/版本号/` 内的七个文件，最后更新根 `latest.xml`。保留全部旧版本和旧 ClickOnce 对象，不进行删除同步；同版本内容不同会拒绝覆盖。发布端需要 boto3、python-dotenv、requests、cryptography。
 6. 验证 RustFS 匿名下载及 GitHub 草稿附件哈希后发布 Release，再验证公开 GitHub 订阅源、签名清单、EXE 下载；两条渠道均须完成实网更新检查和下载哈希验证。未完成独立电脑安装和升级验收时使用预发布。报告提交、标签、Release 链接、下载地址和验证结果；失败说明已完成与待补步骤。
 
 ```powershell
 # 默认只检查本地产物并预览，不访问 RustFS
-python installer/Publish-RustFS.py --version 1.0.24.0 --directory dist/releases/1.0.24.0/oneview
+python installer/Publish-RustFS.py --version 1.0.29.0 --directory dist/releases/1.0.29.0/oneview
 # 用户要求发布时执行，逐文件上传并校验匿名下载，入口最后更新
-python installer/Publish-RustFS.py --version 1.0.24.0 --directory dist/releases/1.0.24.0/oneview --apply
+python installer/Publish-RustFS.py --version 1.0.29.0 --directory dist/releases/1.0.29.0/oneview --apply
 ```
 
 正式更新目录为 `https://oneview.jiarui.net.cn/excel-navigation/`，S3 Endpoint 为同域名根地址，凭据保存在 Git 忽略的本机 `.env`。路由和上传账号已在 1.0.0.2 发布时验证；迁移不改变桶、账号或域名，新的入口在本版正式发布时上传。详情见 [RustFS 接入说明](installer/RustFS接入说明.md)。

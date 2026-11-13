@@ -78,6 +78,13 @@ class WpsCompatibilityCheck
                 Require(counts.Right<=link.Left && link.Right<=dot.Left && counts.Width>80,
                     "Counts, version and dot must not overlap at narrow widths");
             }
+            Call(pane,"SetUpdateStatus",new Version(1,0,98,0));
+            Require(link.Text.StartsWith(currentVersion) && link.Text.Contains("待生效") && link.AccessibleDescription.Contains("已安装 v1.0.98.0"),
+                "Pending install must retain the actual running version and distinguish installed version");
+            pane.Size=new Size(240,600);pane.PerformLayout();footer.PerformLayout();
+            Require(counts.Right<=link.Left && link.Right<=dot.Left && counts.Width>30,"Pending status must not overlap counts in a narrow pane");
+            Call(pane,"SetUpdateStatus",(object)null);
+            Require(link.Text==currentVersion,"Missing installation state must restore ordinary version text");
             Require(controlType.GetField("_updateTimer",F).GetValue(pane)==null,"Uninitialized preview must never start background requests");
             // Feed completed results into the shared cache: exercise the real asynchronous UI path without network or Office.
             var checker = controlType.Assembly.GetType("ExcelNavigatorPane.UpdateChecker");
