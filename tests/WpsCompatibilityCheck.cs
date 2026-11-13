@@ -59,7 +59,12 @@ class WpsCompatibilityCheck
             var counts = (Label)controlType.GetField("_lblCounts",F).GetValue(pane);
             var dot = (Label)controlType.GetField("_updateDot",F).GetValue(pane);
             var footer = (Panel)counts.Parent;
-            string currentVersion = link.Text;
+            var checker = controlType.Assembly.GetType("ExcelNavigatorPane.UpdateChecker");
+            string currentVersion = "v" + checker.GetProperty("CurrentVersion",F).GetValue(null,null);
+            var installedVersion = (Version)checker.GetMethod("ReadInstalledVersion",F).Invoke(null,null);
+            bool pending = installedVersion != null && "v" + installedVersion != currentVersion;
+            string liveText = currentVersion + (pending ? " · 待生效" : "");
+            Call(pane,"SetUpdateStatus",(object)null);
             Require(link.Text.StartsWith("v") && !dot.Visible,"Current version must show without an update dot initially");
             Require(link.Parent==footer && dot.Parent==footer && pane.Controls.Count==1,"Counts and version must share one row, without a second footer");
             Require(!footer.Controls.Cast<Control>().Any(c=>c.Text=="功能说明"),"Feature guide must remain in menu only");
@@ -68,7 +73,7 @@ class WpsCompatibilityCheck
             object info = Activator.CreateInstance(infoType,true);
             infoType.GetField("Version",F).SetValue(info,new Version(1,0,99,0));
             Set(pane,"_availableUpdate",info);
-            Call(pane,"RefreshUpdateStatus");
+            Call(pane,"SetUpdateStatus",(object)null);
             Require(link.Text==currentVersion && dot.Visible && dot.ForeColor==Color.Firebrick,
                 "New release must add red dot without replacing or recoloring current version");
             Require(link.LinkColor==counts.ForeColor && link.AccessibleDescription.Contains("1.0.99.0"),"Version stays gray; accessible hint names the update");
@@ -87,7 +92,6 @@ class WpsCompatibilityCheck
             Require(link.Text==currentVersion,"Missing installation state must restore ordinary version text");
             Require(controlType.GetField("_updateTimer",F).GetValue(pane)==null,"Uninitialized preview must never start background requests");
             // Feed completed results into the shared cache: exercise the real asynchronous UI path without network or Office.
-            var checker = controlType.Assembly.GetType("ExcelNavigatorPane.UpdateChecker");
             var shared = checker.GetField("_sharedCheck",F);
             var checkedAt = checker.GetField("_checkedAt",F);
             object oldTask=shared.GetValue(null), oldTime=checkedAt.GetValue(null);
@@ -113,8 +117,11 @@ class WpsCompatibilityCheck
                     { Application.DoEvents(); System.Threading.Thread.Sleep(5); }
                     Require(!(bool)controlType.GetField("_checkingUpdate",F).GetValue(pane),"Background UI callback must complete");
                     Require(Application.OpenForms.Count==forms,"Automatic result must never open a dialog");
-                    Require(link.Text==currentVersion && dot.Visible && link.AccessibleDescription.Contains(available ? "1.0.100.0" : "1.0.99.0"),
-                        "Failure preserves dot; success updates hint, not installed version");
+                    string expectedHint = pending ? "已安装 v" + installedVersion : available ? "1.0.100.0" : "1.0.99.0";
+                    Require(link.Text==liveText && dot.Visible && link.AccessibleDescription.Contains(expectedHint),
+                        "Failure preserves dot; success respects pending-install hint and running version");
+                    Require(controlType.GetField("_availableUpdate",F).GetValue(pane)==(available ? result : info),
+                        "Pending-install hint must not discard available release metadata");
                 }
             }
             finally { shared.SetValue(null,oldTask); checkedAt.SetValue(null,oldTime); }
@@ -123,7 +130,7 @@ class WpsCompatibilityCheck
                 using(var bitmap=new Bitmap(footer.Width,footer.Height))
                 { footer.DrawToBitmap(bitmap,new Rectangle(0,0,footer.Width,footer.Height)); bitmap.Save(Path.ChangeExtension(statusPreview,"status.png")); }
             Set(pane,"_availableUpdate",null); Call(pane,"RefreshUpdateStatus");
-            Require(!dot.Visible && link.Text==currentVersion,"No available update must clear dot");
+            Require(!dot.Visible && link.Text==liveText,"No available update must clear dot without hiding pending install");
         }
         var dialogType = controlType.GetNestedType("InformationDialog",BindingFlags.NonPublic);
         using(var dialog = (Form)Activator.CreateInstance(dialogType,F,null,new object[]{"更新详情","当前 v1.0.14.0 → 新版 v1.0.15.0",
