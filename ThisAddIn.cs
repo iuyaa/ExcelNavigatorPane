@@ -1,6 +1,9 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Threading.Tasks;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Runtime.CompilerServices;
 using System.Windows.Forms;
 using Excel = Microsoft.Office.Interop.Excel;
@@ -11,6 +14,197 @@ namespace ExcelNavigatorPane
 {
     public partial class ThisAddIn
     {
+        internal sealed class RecentSheetHistory
+        {
+            private Excel.Worksheet _current, _previous;
+            private Excel.Window _currentWindow, _previousWindow;
+            private bool _switching;
+            private IntPtr _formulaOrigin;
+            private (IntPtr Window, string Name, bool Visible) _currentNative, _previousNative;
+            internal bool HasPrevious => _previous != null;
+
+            internal void Record(Excel.Window window, Excel.Worksheet sheet)
+            {
+                if (_switching || window == null || sheet == null) return;
+                ClearFormulaOrigin();
+                var snapshot = (new IntPtr(window.Hwnd), sheet.Name, sheet.Visible == Excel.XlSheetVisibility.xlSheetVisible);
+                if (!ReferenceEquals(sheet, _current))
+                {
+                    _previous = _current;
+                    _previousWindow = _currentWindow;
+                    _previousNative = _currentNative;
+                    _current = sheet;
+                }
+                _currentWindow = window;
+                _currentNative = snapshot;
+            }
+
+            private void Swap()
+            {
+                var sheet = _current; var window = _currentWindow; var native = _currentNative;
+                _current = _previous; _currentWindow = _previousWindow; _currentNative = _previousNative;
+                _previous = sheet; _previousWindow = window; _previousNative = native;
+            }
+
+            internal void ClearFormulaOrigin() { _formulaOrigin = IntPtr.Zero; }
+
+            internal async Task SwitchNative(IntPtr origin, Action<IntPtr> validateFormula, Func<IntPtr, string, Task> navigate)
+            {
+                if (_switching) return;
+                if (_previous == null || _previousNative.Window == IntPtr.Zero)
+                    throw new InvalidOperationException("还没有可切换的上一张工作表，请结束编辑后访问两张表。");
+                if (!_previousNative.Visible) throw new InvalidOperationException("上一张工作表不可见，请先显示它。");
+                _switching = true;
+                try
+                {
+                    IntPtr formulaOrigin = _formulaOrigin == IntPtr.Zero ? origin : _formulaOrigin;
+                    validateFormula(formulaOrigin);
+                    _formulaOrigin = formulaOrigin;
+                    await navigate(_previousNative.Window, _previousNative.Name);
+                    // Once the native tab is selected, commit history without querying the transitioning edit buffer again.
+                    Swap();
+                }
+                finally { _switching = false; }
+            }
+
+            internal void Switch(Excel.Application app)
+            {
+                if (_switching) return;
+                ClearFormulaOrigin();
+                if (_previous == null) throw new InvalidOperationException("还没有可切换的上一张工作表。");
+                Excel.Worksheet target = null;
+                Excel.Window window = null;
+                foreach (Excel.Workbook book in app.Workbooks)
+                {
+                    foreach (Excel.Worksheet sheet in book.Worksheets)
+                        if (ReferenceEquals(sheet, _previous)) target = sheet;
+                    if (target == null) continue;
+                    foreach (Excel.Window candidate in book.Windows)
+                        if (ReferenceEquals(candidate, _previousWindow) || candidate.Hwnd == _previousWindow.Hwnd) window = candidate;
+                    break;
+                }
+                if (target == null || window == null)
+                    throw new InvalidOperationException("上一张工作表或原窗口已关闭或不存在。");
+                if (target.Visible != Excel.XlSheetVisibility.xlSheetVisible)
+                    throw new InvalidOperationException("上一张工作表当前不可见，请先显示它。");
+                _switching = true;
+                try
+                {
+                    // Window activation can activate a different sheet first; ignore these intermediate events.
+                    window.Activate();
+                    target.Activate();
+                    if (!ReferenceEquals(app.ActiveSheet, target))
+                        throw new InvalidOperationException("宿主未切换到目标工作表。");
+                    var snapshot = (new IntPtr(window.Hwnd), target.Name, true);
+                    Swap();
+                    _current = target; _currentWindow = window;
+                    _currentNative = snapshot;
+                }
+                catch
+                {
+                    _switching = false;
+                    Record(app.ActiveWindow, app.ActiveSheet as Excel.Worksheet);
+                    throw;
+                }
+                finally { _switching = false; }
+            }
+        }
+
+        private RecentSheetHistory _recentSheets = new RecentSheetHistory();
+        internal bool IsShuttingDown { get; private set; }
+        internal bool HasRecentSheet => _recentSheets?.HasPrevious == true;
+        internal void SwitchRecentSheet(Excel.Application app)
+        {
+            try { _recentSheets.Switch(app); }
+            finally { RefreshRecentButtons(); }
+        }
+        internal void EndRecentFormulaNavigation() { _recentSheets?.ClearFormulaOrigin(); }
+        internal async Task SwitchRecentNativeAsync(IntPtr origin, Action<IntPtr> validateFormula, Func<IntPtr, string, Task> navigate)
+        {
+            try { await _recentSheets.SwitchNative(origin, validateFormula, navigate); }
+            finally { RefreshRecentButtons(); }
+        }
+        private void RefreshRecentButtons()
+        {
+            foreach (var pane in _windowPanes.Values) pane.Control?.UpdateRecentSheetsButton();
+        }
+        private void RecordActiveSheet()
+        {
+            if (!Application.Ready || (!IsWpsHost && !Application.CommandBars.GetEnabledMso("FileNewDefault"))) return;
+            _recentSheets.Record(Application.ActiveWindow, Application.ActiveSheet as Excel.Worksheet);
+            RefreshRecentButtons();
+        }
+
+        private delegate IntPtr KeyboardProc(int code, IntPtr key, IntPtr flags);
+        private KeyboardProc _keyboardProc;
+        private IntPtr _keyboardHook;
+        private bool _recentKeyHeld;
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int kind, KeyboardProc callback, IntPtr module, uint thread);
+        [DllImport("user32.dll")] private static extern bool UnhookWindowsHookEx(IntPtr hook);
+        [DllImport("user32.dll")] private static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr key, IntPtr flags);
+        [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+        [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+        [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out uint pid);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder text, int length);
+        [DllImport("user32.dll")] private static extern short GetKeyState(int key);
+
+        internal static bool IsRecentKey(int key, long flags, bool extraModifiers) =>
+            key == 0xC0 && (flags & 0x20000000) != 0 && !extraModifiers;
+
+        private bool ShortcutHasHostFocus()
+        {
+            uint pid;
+            if (GetWindowThreadProcessId(GetForegroundWindow(), out pid) != GetCurrentThreadId()) return false;
+            var name = new StringBuilder(128);
+            GetClassName(GetForegroundWindow(), name, name.Capacity);
+            if (name.ToString() == "#32770") return false;
+            return true;
+        }
+
+        private IntPtr HandleRecentKey(int code, IntPtr key, IntPtr flags)
+        {
+            try
+            {
+                long bits = flags.ToInt64();
+                if (code == 0 && key.ToInt32() == 0xC0)
+                {
+                    bool up = (bits & 0x80000000L) != 0;
+                    if (!up && (bits & 0x40000000) == 0) _recentKeyHeld = false;
+                    if (_recentKeyHeld)
+                    {
+                        if (up) _recentKeyHeld = false;
+                        return new IntPtr(1);
+                    }
+                    if (!up && (bits & 0x40000000) == 0 &&
+                        IsRecentKey(key.ToInt32(), bits, GetKeyState(0x11) < 0 || GetKeyState(0x10) < 0 || GetKeyState(0x5B) < 0 || GetKeyState(0x5C) < 0) && ShortcutHasHostFocus())
+                    {
+                        foreach (var pane in _windowPanes.Values)
+                        {
+                            var dispatcher = pane.Control;
+                            if (dispatcher == null || dispatcher.IsDisposed || !dispatcher.IsHandleCreated || !dispatcher.OwnsShortcutForeground()) continue;
+                            // Leave COM outside the hook; recheck the active window and editing state on dispatch.
+                            IntPtr foreground = GetForegroundWindow();
+                            dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                try
+                                {
+                                    if (GetForegroundWindow() != foreground || !ShortcutHasHostFocus()) return;
+                                    if (!dispatcher.IsDisposed && dispatcher.OwnsShortcutForeground())
+                                        dispatcher.ToggleRecentSheets();
+                                }
+                                catch (Exception ex) { LogDebug("执行最近两表快捷键失败。", ex); }
+                            }));
+                            _recentKeyHeld = true;
+                            return new IntPtr(1);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { LogDebug("处理最近两表快捷键失败。", ex); }
+            return CallNextHookEx(_keyboardHook, code, key, flags);
+        }
+
         private sealed class WorksheetReference
         {
             public WorksheetReference(string codeName, Excel.Worksheet fallback)
@@ -60,6 +254,10 @@ namespace ExcelNavigatorPane
                 this.Application.WindowDeactivate += Application_WindowDeactivate;
 
                 EnsurePaneForWindow(this.Application.ActiveWindow, this.Application.ActiveWorkbook);
+                RecordActiveSheet();
+                _keyboardProc = HandleRecentKey;
+                _keyboardHook = SetWindowsHookEx(2, _keyboardProc, IntPtr.Zero, GetCurrentThreadId());
+                if (_keyboardHook == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
             }
             catch (Exception ex)
             {
@@ -73,6 +271,10 @@ namespace ExcelNavigatorPane
 
         private void ThisAddIn_Shutdown(object sender, EventArgs e)
         {
+            IsShuttingDown = true;
+            if (_keyboardHook != IntPtr.Zero) UnhookWindowsHookEx(_keyboardHook);
+            _keyboardHook = IntPtr.Zero;
+            _recentSheets = null;
             try
             {
                 this.Application.WorkbookOpen -= Application_WorkbookOpen;
@@ -126,6 +328,7 @@ namespace ExcelNavigatorPane
             try
             {
                 EnsurePaneForWindow(window, workbook);
+                RecordActiveSheet();
                 CleanupClosedPanes();
                 RefreshAllPanes(all: true);
             }
@@ -150,6 +353,7 @@ namespace ExcelNavigatorPane
             try
             {
                 EnsurePaneForWindow(this.Application.ActiveWindow, workbook);
+                RecordActiveSheet();
             }
             catch (Exception ex)
             {
@@ -178,11 +382,7 @@ namespace ExcelNavigatorPane
                 var workbook = this.Application.ActiveWorkbook;
                 EnsurePaneForWindow(window, workbook);
 
-                NavigationPaneControl control;
-                if (TryGetControl(window, out control))
-                {
-                    control.RecordSheetActivation(sheet as Excel.Worksheet);
-                }
+                RecordActiveSheet();
             }
             catch (Exception ex)
             {

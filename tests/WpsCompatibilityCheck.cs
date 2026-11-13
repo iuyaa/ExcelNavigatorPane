@@ -1,4 +1,4 @@
-// Offline regression: real hidden test HWNDs and COM interface stand-ins; never attaches to Office.
+﻿// Offline regression: real hidden test HWNDs and COM interface stand-ins; never attaches to Office.
 // csc /r:System.Windows.Forms.dll /out:WpsCompatibilityCheck.exe tests\WpsCompatibilityCheck.cs
 // WpsCompatibilityCheck.exe <built ExcelNavigatorPane.dll>
 using System;
@@ -16,6 +16,19 @@ using System.Windows.Forms;
 
 class WpsCompatibilityCheck
 {
+    delegate IntPtr WindowProc(IntPtr window,uint message,IntPtr wParam,IntPtr lParam);
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential,CharSet=System.Runtime.InteropServices.CharSet.Unicode)]
+    struct TestWindowClass
+    {
+        public uint Style; public WindowProc Proc; public int ClassExtra,WindowExtra;
+        public IntPtr Instance,Icon,Cursor,Background; public string Menu,Name;
+    }
+    [System.Runtime.InteropServices.DllImport("user32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode)] static extern ushort RegisterClass(ref TestWindowClass cls);
+    [System.Runtime.InteropServices.DllImport("user32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode)] static extern IntPtr CreateWindowEx(uint exStyle,string cls,string name,uint style,int x,int y,int w,int h,IntPtr parent,IntPtr menu,IntPtr instance,IntPtr param);
+    [System.Runtime.InteropServices.DllImport("user32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode)] static extern IntPtr DefWindowProc(IntPtr window,uint message,IntPtr wParam,IntPtr lParam);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] static extern bool DestroyWindow(IntPtr window);
+    [System.Runtime.InteropServices.DllImport("user32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode)] static extern bool UnregisterClass(string cls,IntPtr instance);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll",CharSet=System.Runtime.InteropServices.CharSet.Unicode)] static extern IntPtr GetModuleHandle(string name);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int GetWindowLong(IntPtr hwnd,int index);
     [System.Runtime.InteropServices.DllImport("user32.dll")] static extern int SetWindowLong(IntPtr hwnd,int index,int value);
     const BindingFlags F = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
@@ -500,6 +513,16 @@ class WpsCompatibilityCheck
             var wb=(ToolStrip)type.GetField("_wbToolStrip",F).GetValue(pane);
             Require(wb.ImageScalingSize.Width==(int)Math.Round(16*scale),"Toolbar image size must follow font scale");
             Require(wb.Items.Cast<ToolStripItem>().Where(i=>i.Image!=null).All(i=>i.Image.Width==wb.ImageScalingSize.Width),"Toolbar vectors must rerender, not stretch old bitmaps");
+            var ascending=(ToolStripButton)wb.Items.Cast<ToolStripItem>().Single(i=>i.AccessibleName=="工作簿名称升序");
+            var descending=(ToolStripButton)wb.Items.Cast<ToolStripItem>().Single(i=>i.AccessibleName=="工作簿名称降序");
+            var add=wb.Items.Cast<ToolStripItem>().Single(i=>i.AccessibleName=="新建工作簿");
+            Require(ascending.Bounds.Right<=descending.Bounds.Left && descending.Bounds.Right<=add.Bounds.Left &&
+                !ascending.IsOnOverflow && !descending.IsOnOverflow,"Both sort buttons must precede add in workbook header");
+            Require(ascending.ToolTipText.Contains("升序") && descending.ToolTipText.Contains("降序"),"Sort buttons have distinct accessible hints");
+            var ws=(ToolStrip)type.GetField("_wsToolStrip",F).GetValue(pane);
+            var newSheet=ws.Items.Cast<ToolStripItem>().Single(i=>i.AccessibleName=="新建工作表");
+            var refresh=ws.Items.Cast<ToolStripItem>().Single(i=>i.AccessibleName=="刷新工作表");
+            Require(newSheet.Bounds.Right<=refresh.Bounds.Left && !newSheet.IsOnOverflow,"New worksheet must precede refresh");
             int manual=(int)type.GetField("_manualWorkbookHeight",F).GetValue(pane);
             Call(pane,"ApplyDpiMetrics",dpi);
             Require(manual==(int)type.GetField("_manualWorkbookHeight",F).GetValue(pane),"Repeat scaling must preserve divider height");
@@ -519,6 +542,248 @@ class WpsCompatibilityCheck
         }
         Console.WriteLine("PASS: simulated 100/125/150/200 percent layout, sharp icon sizes, hit targets, divider preservation, narrow toolbars and scaling roundtrip");
     }
+    static void CheckRecentHistory(Type controlType, Type addinType)
+    {
+        Type historyType=addinType.GetNestedType("RecentSheetHistory",F);
+        object history=Activator.CreateInstance(historyType,true);
+        Type appType=controlType.GetField("_app",F).FieldType;
+        Type bookType=controlType.GetField("_workbook",F).FieldType;
+        Type winType=controlType.GetField("_window",F).FieldType;
+        Type sheetType=controlType.GetMethod("ActivateWorksheetCore",F).GetParameters()[0].ParameterType;
+        Func<Type,string,Type> prop=(t,n)=>t.GetInterfaces().Concat(new[]{t}).SelectMany(x=>x.GetProperties()).First(x=>x.Name==n).PropertyType;
+        Func<Type,ArrayList,object> collection=(t,items)=>Proxy(t,c=>c.MethodName=="GetEnumerator" ? items.GetEnumerator() : (object)items.Count);
+        var books=new ArrayList();var sheetsA=new ArrayList();var sheetsB=new ArrayList();var windowsA=new ArrayList();var windowsB=new ArrayList();
+        object active=null,activeWindow=null;bool hidden=false,ignore=false,fail=false;
+        object windowA=null,windowB=null,sheetA=null,sheetB=null;
+        Action<object,object> record=(w,sh)=>Call(history,"Record",w,sh);
+        windowA=Proxy(winType,c=> { if(c.MethodName=="get_Hwnd")return 101; if(c.MethodName=="GetType")return winType; if(c.MethodName=="Activate") {activeWindow=windowA;record(windowA,sheetA);return null;}throw new Exception(c.MethodName); });
+        windowB=Proxy(winType,c=> { if(c.MethodName=="get_Hwnd")return 102; if(c.MethodName=="GetType")return winType; if(c.MethodName=="Activate") {activeWindow=windowB;record(windowB,sheetB);return null;}throw new Exception(c.MethodName); });
+        Func<bool,object> sheet=isB=>Proxy(sheetType,c=> {
+            if(c.MethodName=="get_Name")return "SameName";
+            if(c.MethodName=="GetType")return sheetType;
+            if(c.MethodName=="get_Visible")return Enum.ToObject(((MethodInfo)c.MethodBase).ReturnType,hidden && isB ? 0 : -1);
+            if(c.MethodName=="Activate") {if(fail)throw new IOException("host failure");if(!ignore)active=isB?sheetB:sheetA;record(activeWindow,active);return null;}
+            throw new Exception(c.MethodName);
+        });
+        sheetA=sheet(false);sheetB=sheet(true);sheetsA.Add(sheetA);sheetsB.Add(sheetB);windowsA.Add(windowA);windowsB.Add(windowB);
+        Func<ArrayList,ArrayList,object> book=(sheets,windows)=>Proxy(bookType,c=>c.MethodName=="get_Worksheets" ? collection(prop(bookType,"Worksheets"),sheets) : collection(prop(bookType,"Windows"),windows));
+        books.Add(book(sheetsA,windowsA));books.Add(book(sheetsB,windowsB));
+        object app=Proxy(appType,c=>c.MethodName=="get_Workbooks" ? collection(prop(appType,"Workbooks"),books) : c.MethodName=="get_ActiveSheet" ? active : activeWindow);
+        active=sheetA;activeWindow=windowA;record(windowA,sheetA);
+        Require(!(bool)historyType.GetProperty("HasPrevious",F).GetValue(history),"First sheet has no previous");
+        active=sheetB;activeWindow=windowB;record(windowB,sheetB);record(windowB,sheetB);
+        Call(history,"Switch",app);Require(ReferenceEquals(active,sheetA) && ReferenceEquals(activeWindow,windowA),"Cross-book switch must restore original window");
+        Call(history,"Switch",app);Require(ReferenceEquals(active,sheetB),"Second invocation must return to B despite intermediate events");
+        Call(history,"Switch",app);
+        hidden=true;try {Call(history,"Switch",app);throw new Exception("Hidden accepted");}catch(InvalidOperationException){}Require(ReferenceEquals(active,sheetA),"Hidden target must not activate");hidden=false;
+        windowsB.Clear();try{Call(history,"Switch",app);throw new Exception("Closed window accepted");}catch(InvalidOperationException){}windowsB.Add(windowB);
+        sheetsB.Clear();try{Call(history,"Switch",app);throw new Exception("Deleted sheet accepted");}catch(InvalidOperationException){}sheetsB.Add(sheetB);
+        ignore=true;try{Call(history,"Switch",app);throw new Exception("Ignored activation accepted");}catch(InvalidOperationException){}ignore=false;
+        // Re-seed a known pair after a failed host operation.
+        history=Activator.CreateInstance(historyType,true);active=sheetB;activeWindow=windowB;record(windowB,sheetB);active=sheetA;activeWindow=windowA;record(windowA,sheetA);
+        fail=true;try{Call(history,"Switch",app);throw new Exception("Host failure accepted");}catch(IOException){}fail=false;
+        Require(!(bool)historyType.GetField("_switching",F).GetValue(history),"Failure must release history suppression");
+        history=Activator.CreateInstance(historyType,true);record(windowA,sheetA);record(windowB,sheetB);
+        var seen=new List<IntPtr>();var origins=new List<IntPtr>();
+        Action<IntPtr> validate=o=>origins.Add(o);
+        Action<IntPtr,Func<IntPtr,string,Task>> switchNative=(o,n)=>((Task)Call(history,"SwitchNative",o,validate,n)).GetAwaiter().GetResult();
+        Func<IntPtr,string,Task> native=(target,name)=> {
+            seen.Add(target);
+            Require(name=="SameName","Native snapshot must preserve exact name");
+            // Native activation events must not replace the cached pair or edit origin.
+            record(windowB,sheetB);return Task.FromResult(0);
+        };
+        switchNative(new IntPtr(102),native);
+        switchNative(new IntPtr(101),native);
+        Require(seen.SequenceEqual(new[]{new IntPtr(101),new IntPtr(102)}) && origins.All(x=>x==new IntPtr(102)),
+            "Formula origin must survive switching between panes and repeated events");
+        Func<IntPtr,string,Task> failed=(t,n)=> {throw new IOException("native failure");};
+        try {switchNative(new IntPtr(101),failed);throw new Exception("Failure accepted");}catch(IOException){}
+        switchNative(new IntPtr(101),native);
+        Require(seen.Last()==new IntPtr(101),"Failed native switch must not advance history");
+        Call(history,"ClearFormulaOrigin");
+        switchNative(new IntPtr(101),native);
+        Require(origins.Last()==new IntPtr(101),"Next edit must use its own origin");
+        // Reproduce the user's three-key sequence: a second buffer read after navigation would fail.
+        history=Activator.CreateInstance(historyType,true);record(windowA,sheetA);record(windowB,sheetB);seen.Clear();
+        bool navigated=false;int checks=0;
+        validate=o=> {Require(!navigated,"Post-switch buffer is temporarily unavailable");checks++;};
+        Func<IntPtr,string,Task> transition=(t,n)=> {navigated=true;return native(t,n);};
+        for(int i=0;i<3;i++) {navigated=false;switchNative(new IntPtr(102),transition);}
+        Require(checks==3 && seen.SequenceEqual(new[]{new IntPtr(101),new IntPtr(102),new IntPtr(101)}),
+            "Each key must validate once before navigation and immediately alternate history");
+        int before=seen.Count;validate=o=> {throw new InvalidOperationException("Cannot verify formula");};
+        try {switchNative(new IntPtr(102),native);throw new Exception("Failed validation accepted");}catch(InvalidOperationException){}
+        Require(seen.Count==before,"Failed formula validation must not start navigation");
+        validate=o=>{};switchNative(new IntPtr(102),native);
+        Require(seen.Last()==new IntPtr(102),"Failed preflight must preserve the actual previous target");
+        var key=addinType.GetMethod("IsRecentKey",F);
+        Require((bool)key.Invoke(null,new object[]{0xC0,0x20000000L,false}),"Alt+backtick must match");
+        Require(!(bool)key.Invoke(null,new object[]{0xC0,0L,false}) && !(bool)key.Invoke(null,new object[]{0xC0,0x20000000L,true}) && !(bool)key.Invoke(null,new object[]{0x41,0x20000000L,false}),"Plain key, extra modifiers and unrelated keys must pass through");
+        Console.WriteLine("PASS: instance-wide recent sheets, repeated events, cross-book return, original window, hidden/deleted/closed targets, three-key alternation with one preflight per key, failed validation/navigation and shortcut matching");
+    }
+    static void CheckFormulaText(Type controlType)
+    {
+        var validate=controlType.GetMethod("RequireFormulaText",F);
+        foreach(string text in new[]{"=","=SUM(","='销售 数据'!B2","=\"中文\"","  =A1"})
+            Require((string)validate.Invoke(null,new object[]{text})==text,"Unfinished formulas must be read without rewriting");
+        foreach(string text in new[]{null,"","draft","'=A1","123"})
+        {
+            try {validate.Invoke(null,new object[]{text});throw new Exception("Nonformula accepted");}
+            catch(TargetInvocationException ex) {Require(ex.InnerException is InvalidOperationException,"Wrong formula guard error");}
+        }
+        var infoType=controlType.GetNestedType("FormulaEditInfo",F);
+        var copy=controlType.GetMethod("CopyFormulaEditInfo",F);
+        Require(System.Runtime.InteropServices.Marshal.SizeOf(infoType)==(IntPtr.Size==8 ? 32 : 24),"Native edit buffer layout must match host bitness");
+        string formula="=SUM(中文!B2";
+        IntPtr buffer=System.Runtime.InteropServices.Marshal.StringToHGlobalUni(formula);
+        try
+        {
+            object info=Activator.CreateInstance(infoType);
+            infoType.GetField("Length",F).SetValue(info,formula.Length);
+            infoType.GetField("Text",F).SetValue(info,buffer);
+            infoType.GetField("SelectionStart",F).SetValue(info,3);
+            infoType.GetField("SelectionEnd",F).SetValue(info,5);
+            infoType.GetField("Caret",F).SetValue(info,5);
+            foreach(int mode in new[]{1,2,4})
+            {
+                infoType.GetField("Mode",F).SetValue(info,mode);
+                Require((string)copy.Invoke(null,new object[]{0,info})==formula,"Copy full unfinished Unicode formula in each native edit mode");
+                Require(System.Runtime.InteropServices.Marshal.PtrToStringUni(buffer)==formula && (int)infoType.GetField("Caret",F).GetValue(info)==5,"Read must preserve buffer and caret");
+            }
+            // Undefined pointers in Ready/error states must be rejected without dereferencing them.
+            infoType.GetField("Text",F).SetValue(info,new IntPtr(1));
+            foreach(var invalid in new[]{new[]{0,0,3},new[]{32,1,3},new[]{0,8,3},new[]{0,1,-1},new[]{0,1,32768}})
+            {
+                infoType.GetField("Mode",F).SetValue(info,invalid[1]);infoType.GetField("Length",F).SetValue(info,invalid[2]);
+                try {copy.Invoke(null,new object[]{invalid[0],info});throw new Exception("Invalid native buffer accepted");}
+                catch(TargetInvocationException ex) {Require(ex.InnerException is InvalidOperationException,"Wrong native state guard");}
+            }
+        }
+        finally {System.Runtime.InteropServices.Marshal.FreeHGlobal(buffer);}
+        Console.WriteLine("PASS: native edit buffer layout/modes, Unicode/caret preservation, Ready/error/invalid-length rejection before pointer access and ordinary text guard (offline)");
+    }
+    static void CheckFormulaThreadGuard(Type controlType,Type addinType)
+    {
+        // A hidden HWND in the test process exercises validation without attaching to Office or loading XLCALL32.
+        var cls=new TestWindowClass {Name="XLMAIN",Instance=GetModuleHandle(null),Proc=DefWindowProc};
+        Require(RegisterClass(ref cls)!=0,"Register owned test class");
+        IntPtr window=CreateWindowEx(0,"XLMAIN","Formula buffer guard check",0,0,0,1,1,IntPtr.Zero,IntPtr.Zero,cls.Instance,IntPtr.Zero);
+        Require(window!=IntPtr.Zero,"Create owned test window");
+        try
+        {
+            using(var pane=(Control)Activator.CreateInstance(controlType))
+            {
+                object addin=FormatterServices.GetUninitializedObject(addinType);Set(pane,"_addIn",addin);
+                uint pid=(uint)System.Diagnostics.Process.GetCurrentProcess().Id;
+                Action read=()=>Call(pane,"ReadNativeFormula",window,pid);
+                try {Task.Run(read).GetAwaiter().GetResult();throw new Exception("Worker-thread read accepted");}
+                catch(InvalidOperationException ex) {Require(ex.Message.Contains("主线程"),"Wrong worker thread rejection");}
+                try {read();throw new Exception("Non-Excel host accepted");}
+                catch(InvalidOperationException ex) {Require(ex.Message.Contains("仅适用于 Excel"),"Wrong non-Excel rejection");}
+                Set(addin,"<IsShuttingDown>k__BackingField",true);
+                try {read();throw new Exception("Shutdown read accepted");}
+                catch(InvalidOperationException ex) {Require(ex.Message.Contains("正在退出"),"Wrong shutdown rejection");}
+            }
+        }
+        finally {DestroyWindow(window);UnregisterClass("XLMAIN",cls.Instance);GC.KeepAlive(cls.Proc);}
+        Console.WriteLine("PASS: worker-thread, foreign host and shutdown guards before native API loading (owned test HWND only)");
+    }
+    static void CheckNewWorksheet(Type controlType,Type addinType)
+    {
+        Type appType=controlType.GetField("_app",F).FieldType,bookType=controlType.GetField("_workbook",F).FieldType;
+        Type winType=controlType.GetField("_window",F).FieldType;
+        Type sheetType=controlType.GetMethod("NewWorksheetCore",F).ReturnType;
+        Func<Type,string,Type> prop=(t,n)=>t.GetInterfaces().Concat(new[]{t}).SelectMany(x=>x.GetProperties()).First(x=>x.Name==n).PropertyType;
+        var calls=new List<string>();bool ready=true,protect=false;
+        object last=null;
+        object sheet=Proxy(sheetType,c=> {if(c.MethodName=="GetType")return sheetType;if(c.MethodName=="Activate") {calls.Add("sheet");return null;}throw new Exception(c.MethodName);});
+        last=Proxy(sheetType,c=>c.MethodName=="GetType" ? sheetType : null);
+        object sheets=Proxy(prop(bookType,"Sheets"),c=>c.MethodName=="get_Count" ? (object)1 : last);
+        object worksheets=Proxy(prop(bookType,"Worksheets"),c=> {
+            if(c.MethodName=="GetType") return prop(bookType,"Worksheets");
+            Require(c.MethodName=="Add" && ReferenceEquals(c.Args[1],last) && Convert.ToInt32(c.Args[2])==1,
+                "Add exactly one worksheet after the owning workbook's final sheet: "+c.MethodName);calls.Add("add");return sheet;
+        });
+        object book=Proxy(bookType,c=>c.MethodName=="get_ProtectStructure" ? (object)protect : c.MethodName=="get_Sheets" ? sheets :
+            c.MethodName=="get_Worksheets" ? worksheets : throw new Exception(c.MethodName));
+        object window=Proxy(winType,c=> {Require(c.MethodName=="Activate","Only owning window activation expected");calls.Add("window");return null;});
+        object commandBars=Proxy(prop(appType,"CommandBars"),c=>true);
+        object books=Proxy(prop(appType,"Workbooks"),c=>c.MethodName=="GetEnumerator" ? new object[0].GetEnumerator() : (object)0);
+        object app=Proxy(appType,c=>c.MethodName=="get_Ready" ? (object)ready : c.MethodName=="get_CommandBars" ? commandBars :
+            c.MethodName=="get_Workbooks" ? books : throw new Exception("Unexpected application access: "+c.MethodName));
+        using(var pane=(Control)Activator.CreateInstance(controlType))
+        {
+            object addin=FormatterServices.GetUninitializedObject(addinType);
+            Set(pane,"_app",app);Set(pane,"_workbook",book);Set(pane,"_window",window);Set(pane,"_addIn",addin);
+            foreach(bool wps in new[]{false,true})
+            {
+                Set(addin,"<IsWpsHost>k__BackingField",wps);calls.Clear();
+                Require(ReferenceEquals(Call(pane,"NewWorksheetCore"),sheet) && string.Join(",",calls)=="window,add,sheet",
+                    "Both hosts must create in bound workbook and activate the returned worksheet");
+                calls.Clear();protect=true;
+                try {Call(pane,"NewWorksheetCore");throw new Exception("Protected creation accepted");}catch(InvalidOperationException){}
+                protect=false;ready=false;
+                try {Call(pane,"NewWorksheetCore");throw new Exception("Editing creation accepted");}catch(InvalidOperationException){}
+                Require(calls.Count==0,"Protection/editing must reject before any activation or mutation");ready=true;
+            }
+            Set(pane,"_workbook",null);
+            var up=(ToolStripButton)controlType.GetField("_btnWbSortAZ",F).GetValue(pane);
+            var down=(ToolStripButton)controlType.GetField("_btnWbSortZA",F).GetValue(pane);
+            up.PerformClick();Require(up.Checked && !down.Checked,"Ascending button applies checked state directly");
+            down.PerformClick();Require(!up.Checked && down.Checked,"Descending button replaces ascending");
+            down.PerformClick();Require(!up.Checked && !down.Checked,"Clicking current direction restores default");
+        }
+        Console.WriteLine("PASS: direct sort buttons and toggle state; new worksheet ownership/append/activation, structure protection and editing guards in both hosts (offline)");
+    }
+    static void CheckNavigationWheel(Type controlType)
+    {
+        using(var form=new Form {StartPosition=FormStartPosition.Manual,Location=new Point(-20000,-20000),ShowInTaskbar=false})
+        using(var pane=(Control)Activator.CreateInstance(controlType))
+        {
+            form.Controls.Add(pane);pane.Dock=DockStyle.Fill;form.ClientSize=new Size(320,650);form.Show();
+            var list=(ListBox)controlType.GetField("_lbWorksheets",F).GetValue(pane);
+            var itemType=controlType.GetNestedType("WsItem",F);
+            for(int i=0;i<100;i++)
+            {
+                object item=Activator.CreateInstance(itemType,true);
+                itemType.GetProperty("Name",F).SetValue(item,"Sheet"+i);list.Items.Add(item);
+            }
+            list.SelectedIndex=40;list.TopIndex=20;
+            Call(list,"ScrollWheel",-60,3);Require(list.TopIndex==20,"Partial wheel input must accumulate");
+            Call(list,"ScrollWheel",-60,3);Require(list.TopIndex==23,"One notch scrolls configured rows");
+            Call(list,"ScrollWheel",120,3);Require(list.TopIndex==20,"Wheel direction");
+            Call(list,"ScrollWheel",-120,-1);Require(list.TopIndex>20,"Page scrolling");
+            int top=list.TopIndex;Call(list,"ScrollWheel",-120,0);Require(list.TopIndex==top,"Disabled system scrolling");
+            Call(list,"ScrollWheel",32760,3);Require(list.TopIndex==0,"Clamp at top");
+            Call(list,"ScrollWheel",-32760,3);Require(list.TopIndex>0 && list.TopIndex<100,"Clamp at bottom");
+            Require(list.SelectedIndex==40,"Scrolling must not change selection");
+            Type wheelType=controlType.GetNestedType("MouseWheelHookData",F), mouseType=controlType.GetNestedType("MouseHookData",F);
+            object mouse=Activator.CreateInstance(mouseType),wheel=Activator.CreateInstance(wheelType);
+            mouseType.GetField("Hwnd",F).SetValue(mouse,form.Handle);
+            mouseType.GetField("Point",F).SetValue(mouse,list.PointToScreen(new Point(10,10)));
+            wheelType.GetField("Mouse",F).SetValue(wheel,mouse);
+            wheelType.GetField("MouseData",F).SetValue(wheel,unchecked((uint)(-120<<16)));
+            IntPtr data=System.Runtime.InteropServices.Marshal.AllocHGlobal(System.Runtime.InteropServices.Marshal.SizeOf(wheel));
+            try
+            {
+                // No Office object is attached: routing must not read Ready or call any COM method.
+                foreach(bool enabled in new[]{true,false})
+                {
+                    list.Enabled=enabled;list.TopIndex=10;
+                    System.Runtime.InteropServices.Marshal.StructureToPtr(wheel,data,false);
+                    Require((IntPtr)Call(pane,"HandleNavigationMouse",0,new IntPtr(0x020A),data)==new IntPtr(1),"Wheel over list must be consumed");
+                    Require(list.TopIndex>=10 && list.SelectedIndex==40,"Disabled edit-time list must scroll without changing selection");
+                }
+                mouseType.GetField("Point",F).SetValue(mouse,new Point(0,0));wheelType.GetField("Mouse",F).SetValue(wheel,mouse);
+                System.Runtime.InteropServices.Marshal.StructureToPtr(wheel,data,false);top=list.TopIndex;
+                Require((IntPtr)Call(pane,"HandleNavigationMouse",0,new IntPtr(0x020A),data)==IntPtr.Zero && list.TopIndex==top,"Wheel outside pane must pass through");
+            }
+            finally {System.Runtime.InteropServices.Marshal.FreeHGlobal(data);}
+            form.Hide();
+        }
+        Console.WriteLine("PASS: navigation wheel routing without COM/focus, edit-time disabled list, partial deltas, row/page settings and bounds");
+    }
     [STAThread]
     static int Main(string[] args)
     {
@@ -527,6 +792,11 @@ class WpsCompatibilityCheck
             var assembly = Assembly.LoadFrom(args[0]);
             var addinType = assembly.GetType("ExcelNavigatorPane.ThisAddIn");
             var controlType = assembly.GetType("ExcelNavigatorPane.NavigationPaneControl");
+            CheckRecentHistory(controlType,addinType);
+            CheckFormulaText(controlType);
+            CheckFormulaThreadGuard(controlType,addinType);
+            CheckNewWorksheet(controlType,addinType);
+            CheckNavigationWheel(controlType);
             CheckWorkbookCopy(controlType);
             CheckWorkbookRename(controlType);
             CheckDpiLayout(controlType);
@@ -652,8 +922,11 @@ class WpsCompatibilityCheck
                 Call(control,"LbWorkbooks_MouseClick",workbookList,new MouseEventArgs(MouseButtons.Right,1,4,workbookList.GetItemRectangle(1).Bottom+5,0));
                 Require(menuOpenings == 2 && controlType.GetField("_workbookMenuTarget",F).GetValue(control)==null,"Blank area must open a targetless menu");
                 foreach(string label in new[]{"保存","重命名...","复制文件","复制文件路径","关闭"}) Require(!menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank area must hide target-specific actions");
-                foreach(string label in new[]{"新建","打开...","排序","刷新列表","检查更新","功能说明"}) Require(menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank menu missing common action: "+label);
+                foreach(string label in new[]{"新建","打开...","刷新列表","检查更新","功能说明"}) Require(menu.Items.Cast<ToolStripItem>().Single(i=>i.Text==label).Available,"Blank menu missing common action: "+label);
+                Require(!menu.Items.Cast<ToolStripItem>().Any(i=>i.Text=="排序"),"Sorting must move out of the workbook context menu");
                 var headingStrip = (ToolStrip)controlType.GetField("_wbToolStrip",F).GetValue(control);
+                Require(headingStrip.Items.Contains((ToolStripItem)controlType.GetField("_btnWbSortAZ",F).GetValue(control)) &&
+                    headingStrip.Items.Contains((ToolStripItem)controlType.GetField("_btnWbSortZA",F).GetValue(control)),"Sort commands must be independent header buttons");
                 headingStrip.Items.Cast<ToolStripItem>().Single(i=>i.AccessibleName=="工作簿操作").PerformClick();
                 Require(menuOpenings==3 && ReferenceEquals(controlType.GetField("_workbookMenuTarget",F).GetValue(control),otherBook),"Three-dot entry must reuse the menu with its selected workbook");
                 workbookList.Items.Clear();

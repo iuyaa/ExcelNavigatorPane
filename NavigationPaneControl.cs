@@ -70,6 +70,7 @@ namespace ExcelNavigatorPane
         private MouseHookProc _mouseHookProc;
         private NavigationListBox _pressedList;
         private int _pressedListIndex = -1;
+        private bool _pressedRecent;
         private bool _nativeNavigationInput;
         private SynchronizationContext _uiContext;
         private System.Windows.Forms.Timer _editRefreshTimer;
@@ -104,6 +105,18 @@ namespace ExcelNavigatorPane
 
         private sealed class NavigationListBox : ListBox
         {
+            private int _wheelRemainder;
+            internal void ScrollWheel(int delta, int lines)
+            {
+                if (lines == 0 || Items.Count == 0) return;
+                _wheelRemainder += delta;
+                int steps = _wheelRemainder / 120;
+                _wheelRemainder %= 120;
+                if (steps == 0) return;
+                int rows = Math.Max(1, ClientSize.Height / ItemHeight);
+                int amount = lines < 0 ? rows : lines;
+                TopIndex = (int)Math.Max(0, Math.Min(Math.Max(0, Items.Count - rows), (long)TopIndex - (long)steps * amount));
+            }
             public object SelectionBeforeClick { get; private set; }
             public bool SuppressClick { get; set; }
             public void BeginNativeClick() { SelectionBeforeClick = SelectedItem; SuppressClick = false; }
@@ -126,8 +139,8 @@ namespace ExcelNavigatorPane
         private ToolStripLabel _worksheetHeading;
         private readonly List<Image> _toolbarImages = new List<Image>();
         private ToolStrip _wbToolStrip;
-        private ToolStripMenuItem _btnWbSortAZ;
-        private ToolStripMenuItem _btnWbSortZA;
+        private ToolStripButton _btnWbSortAZ;
+        private ToolStripButton _btnWbSortZA;
         private NavigationListBox _lbWorkbooks;
 
         private ToolStrip _wsToolStrip;
@@ -155,10 +168,6 @@ namespace ExcelNavigatorPane
         private Font _countsFont;
         private Font _boldFont;
         private WorkbookSortMode _sortMode;
-        private string _currentSheetCodeName;
-        private string _previousSheetCodeName;
-        private Excel.Worksheet _currentWorksheet;
-        private Excel.Worksheet _previousWorksheet;
 
         private int _hoveredWbIndex = -1;
         private bool _hoveredWbClose;
@@ -309,7 +318,7 @@ namespace ExcelNavigatorPane
                     _btnToggleHidden.DisplayStyle = _btnRecentSheets.DisplayStyle = labels + Px(56) > actions.DisplayRectangle.Width
                         ? ToolStripItemDisplayStyle.Image : ToolStripItemDisplayStyle.ImageAndText;
                     int filter = TextRenderer.MeasureText(graphics, _btnListHiddenSheets.Text, _baseFont).Width;
-                    _btnListHiddenSheets.DisplayStyle = _worksheetHeading.Width + filter + Px(48) > _wsToolStrip.DisplayRectangle.Width
+                    _btnListHiddenSheets.DisplayStyle = _worksheetHeading.Width + filter + Px(80) > _wsToolStrip.DisplayRectangle.Width
                         ? ToolStripItemDisplayStyle.Image : ToolStripItemDisplayStyle.Text;
                 }
             }
@@ -347,7 +356,7 @@ namespace ExcelNavigatorPane
                 LogDebug("启用列表双缓冲失败。", ex);
             }
 
-            SeedSheetHistory();
+            UpdateRecentSheetsButton();
             RefreshAll();
             _updateTimer = new System.Windows.Forms.Timer { Interval = 15000 };
             _updateTimer.Tick += (sender, args) =>
@@ -362,38 +371,17 @@ namespace ExcelNavigatorPane
         {
             if (window == null || workbook == null) return;
 
-            bool changed = !IsSameWindow(_window, window) || !IsSameWorkbook(_workbook, workbook);
             _window = window;
             _workbook = workbook;
 
             CacheWindowIdentity();
 
-            if (changed) SeedSheetHistory();
+            UpdateRecentSheetsButton();
         }
 
         internal bool IsBoundToWorkbook(Excel.Workbook workbook)
         {
             return IsSameWorkbook(_workbook, workbook);
-        }
-
-        internal void RecordSheetActivation(Excel.Worksheet worksheet)
-        {
-            if (worksheet == null || !IsWorksheetInBoundWorkbook(worksheet)) return;
-
-            string codeName = GetWorksheetCodeName(worksheet);
-            bool sameWorksheet = ReferenceEquals(worksheet, _currentWorksheet) ||
-                                 (!string.IsNullOrEmpty(codeName) &&
-                                  string.Equals(
-                                      codeName,
-                                      _currentSheetCodeName,
-                                      StringComparison.OrdinalIgnoreCase));
-            if (sameWorksheet) return;
-
-            _previousSheetCodeName = _currentSheetCodeName;
-            _previousWorksheet = _currentWorksheet;
-            _currentSheetCodeName = codeName;
-            _currentWorksheet = worksheet;
-            UpdateRecentSheetsButton();
         }
 
         public void RefreshAll(bool reportErrors = false)
@@ -616,20 +604,28 @@ namespace ExcelNavigatorPane
             _workbookContextMenu.Items.AddRange(CreateWorkbookMenuItems());
             workbookActions.Click += (sender, args) => ShowWorkbookMenu(_wbToolStrip,
                 new Point(workbookActions.Bounds.Left, workbookActions.Bounds.Bottom), GetCommandWorkbook());
-            _btnWbSortAZ = new ToolStripMenuItem("名称升序 A–Z");
-            _btnWbSortZA = new ToolStripMenuItem("名称降序 Z–A");
-            var sortMenu = new ToolStripMenuItem("排序");
-            sortMenu.DropDownItems.AddRange(new ToolStripItem[] { _btnWbSortAZ, _btnWbSortZA });
+            _btnWbSortAZ = new ToolStripButton
+            {
+                Image = CreateToolbarIcon("sort-up"), DisplayStyle = ToolStripItemDisplayStyle.Image,
+                ToolTipText = "工作簿名称升序 A–Z；再次点击恢复默认顺序",
+                AccessibleName = "工作簿名称升序", Alignment = ToolStripItemAlignment.Right
+            };
+            _btnWbSortZA = new ToolStripButton
+            {
+                Image = CreateToolbarIcon("sort-down"), DisplayStyle = ToolStripItemDisplayStyle.Image,
+                ToolTipText = "工作簿名称降序 Z–A；再次点击恢复默认顺序",
+                AccessibleName = "工作簿名称降序", Alignment = ToolStripItemAlignment.Right
+            };
             var help = new ToolStripMenuItem("功能说明");
             _checkUpdates = new ToolStripMenuItem("检查更新") { ToolTipText = "后台检查新版本，点击更新提示查看变化" };
             _checkUpdates.Click += (sender, args) => CheckUpdates(true);
-            _workbookContextMenu.Items.AddRange(new ToolStripItem[] { new ToolStripSeparator(), sortMenu, _checkUpdates, help });
+            _workbookContextMenu.Items.AddRange(new ToolStripItem[] { new ToolStripSeparator(), _checkUpdates, help });
             var newWorkbook = new ToolStripButton { Image = CreateToolbarIcon("add"), DisplayStyle = ToolStripItemDisplayStyle.Image,
                 ToolTipText = "新建工作簿", AccessibleName = "新建工作簿", Alignment = ToolStripItemAlignment.Right };
             newWorkbook.Click += (sender, args) => NewWorkbook();
             var refreshWorkbooks = new ToolStripMenuItem("刷新列表");
             _workbookContextMenu.Items.Add(refreshWorkbooks);
-            _wbToolStrip.Items.AddRange(new ToolStripItem[] { _workbookHeading, workbookActions, newWorkbook });
+            _wbToolStrip.Items.AddRange(new ToolStripItem[] { _workbookHeading, workbookActions, newWorkbook, _btnWbSortZA, _btnWbSortAZ });
 
             _lbWorkbooks = new NavigationListBox
             {
@@ -690,7 +686,14 @@ namespace ExcelNavigatorPane
             UpdateListedHiddenSheetsButton();
             var refreshWorksheets = new ToolStripButton { Image = CreateToolbarIcon("refresh"), DisplayStyle = ToolStripItemDisplayStyle.Image,
                 ToolTipText = "刷新工作表", AccessibleName = "刷新工作表", Alignment = ToolStripItemAlignment.Right };
-            _wsToolStrip.Items.AddRange(new ToolStripItem[] { _worksheetHeading, refreshWorksheets, _btnListHiddenSheets });
+            var newWorksheet = new ToolStripButton { Image = CreateToolbarIcon("add"), DisplayStyle = ToolStripItemDisplayStyle.Image,
+                ToolTipText = "在当前工作簿末尾新建工作表并切换过去", AccessibleName = "新建工作表", Alignment = ToolStripItemAlignment.Right };
+            newWorksheet.Click += (sender, args) => RunUserAction("无法新建工作表", () =>
+            {
+                NewWorksheetCore();
+                _addIn?.RefreshWorkbookPanes(_workbook, all: false);
+            });
+            _wsToolStrip.Items.AddRange(new ToolStripItem[] { _worksheetHeading, refreshWorksheets, newWorksheet, _btnListHiddenSheets });
 
             var searchStrip = new ToolStrip { Dock = DockStyle.Top, GripStyle = ToolStripGripStyle.Hidden,
                 Renderer = flatRenderer, BackColor = ColorSidebar, Padding = new Padding(6, 5, 6, 5) };
@@ -712,7 +715,7 @@ namespace ExcelNavigatorPane
             _btnToggleHidden = new ToolStripButton { Image = CreateToolbarIcon("eye") };
             UpdateHiddenSheetsButton();
             _btnRecentSheets = new ToolStripButton("最近两表") { Image = CreateToolbarIcon("switch"),
-                ToolTipText = "切换最近使用的两张工作表", Enabled = false, Alignment = ToolStripItemAlignment.Right };
+                ToolTipText = "切换最近两张工作表（同一实例内可跨工作簿），快捷键 Alt + `", Enabled = false, Alignment = ToolStripItemAlignment.Right };
             sheetActions.Items.AddRange(new ToolStripItem[] { _btnToggleHidden, _btnRecentSheets });
             _btnToggleHidden.Overflow = _btnRecentSheets.Overflow = ToolStripItemOverflow.Never;
             sheetActions.SizeChanged += (sender, args) => LayoutSheetCommands();
@@ -909,7 +912,8 @@ namespace ExcelNavigatorPane
                 "• 重命名：右键工作簿选择重命名，保留原格式；验证新文件保存成功后删除旧文件。支持已同步到本机的 OneDrive 文件，不覆盖同名文件；云端同步由 OneDrive 完成。\r\n" +
                 "• 复制文件：点击关闭按钮前的复制图标，保存修改并复制原文件，可粘贴到支持文件的聊天或邮件客户端。OneDrive 文件被占用时，需关闭并等待保存完成。\r\n" +
                 "• 复制文件路径：右键工作簿选择此项，复制本机完整路径文本；不保存修改，OneDrive 文件使用本机同步路径。新工作簿需先保存。\r\n" +
-                "• 排序：在右键菜单选择名称升序或降序，再次点击恢复默认。\r\n\r\n" +
+                "• 排序：直接点击工作簿标题栏加号左侧的升序或降序按钮；再次点击当前方向恢复默认顺序。\r\n\r\n" +
+                "• 新建工作表：点击工作表标题栏刷新按钮左侧的加号，在当前工作簿末尾新建一张表并切换过去。编辑中或工作簿结构受保护时无法新建。\r\n\r\n" +
                 "工作表\r\n" +
                 "• 拖动排序：按住工作表名称，按插入线放到目标前后；普通隐藏表保持隐藏，深度隐藏表不移动。编辑中或结构受保护时不可移动。\r\n" +
                 "• 搜索：输入名称筛选，点击清除按钮恢复列表。\r\n" +
@@ -918,7 +922,8 @@ namespace ExcelNavigatorPane
                 "• 眼睛按钮：隐藏或取消隐藏单张表；取消隐藏后自动切换过去。\r\n" +
                 "• 取消隐藏 / 恢复隐藏：临时显示普通隐藏表，再恢复原状态。深度隐藏表不修改。\r\n" +
                 "• 锁图标：调用宿主的工作表保护或取消保护命令。\r\n" +
-                "• 最近两表：在最近使用的两张工作表之间往返。\r\n\r\n" +
+                "• 最近两表：点击按钮或按 Alt + `，在同一实例最近访问的两张表之间往返，可跨工作簿；搜索关键词保留。Excel 公式编辑时使用原生标签切换，不提交或取消输入；WPS 编辑中暂不支持。已关闭、删除或隐藏的目标不自动打开或显示。\r\n\r\n" +
+                "• 滚轮：鼠标位于工作簿或工作表列表时滚动对应列表，单元格编辑时也无需退出编辑。\r\n\r\n" +
                 "布局与使用提示\r\n" +
                 "• 拖动分隔线调整工作簿区高度，双击恢复自动高度。\r\n" +
                 "• 工作簿区域空白处也可右键打开菜单。\r\n" +
@@ -1117,6 +1122,16 @@ namespace ExcelNavigatorPane
                         case "switch":
                             graphics.DrawLines(pen, new[] { new Point(2, 5), new Point(13, 5), new Point(10, 2) });
                             graphics.DrawLines(pen, new[] { new Point(14, 11), new Point(3, 11), new Point(6, 14) });
+                            break;
+                        case "sort-up":
+                        case "sort-down":
+                            graphics.DrawLine(pen, 2, 4, 8, 4);
+                            graphics.DrawLine(pen, 2, 8, 6, 8);
+                            graphics.DrawLine(pen, 2, 12, 4, 12);
+                            graphics.DrawLine(pen, 12, 3, 12, 13);
+                            int tip = name == "sort-up" ? 3 : 13;
+                            int wing = name == "sort-up" ? 6 : 10;
+                            graphics.DrawLines(pen, new[] { new Point(9, wing), new Point(12, tip), new Point(15, wing) });
                             break;
                         case "eye":
                         case "eye-off":
@@ -1700,6 +1715,17 @@ namespace ExcelNavigatorPane
             });
         }
 
+        private Excel.Worksheet NewWorksheetCore()
+        {
+            EnsureReady();
+            if (_workbook == null) throw new InvalidOperationException("当前没有工作簿。");
+            if (_workbook.ProtectStructure) throw new InvalidOperationException("工作簿结构受保护，无法新建工作表。");
+            _window.Activate();
+            var sheet = (Excel.Worksheet)_workbook.Worksheets.Add(After: _workbook.Sheets[_workbook.Sheets.Count], Count: 1);
+            sheet.Activate();
+            return sheet;
+        }
+
         private void OpenWorkbook()
         {
             RunUserAction("无法打开工作簿", () =>
@@ -2008,6 +2034,12 @@ namespace ExcelNavigatorPane
             public uint HitTest;
             public UIntPtr ExtraInfo;
         }
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MouseWheelHookData
+        {
+            public MouseHookData Mouse;
+            public uint MouseData;
+        }
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr SetWindowsHookEx(int type, MouseHookProc callback, IntPtr module, uint thread);
         [DllImport("user32.dll")]
@@ -2034,6 +2066,7 @@ namespace ExcelNavigatorPane
                 {
                     if (!IsReadyForCommands()) return;
                     _editRefreshTimer.Stop();
+                    _addIn?.EndRecentFormulaNavigation();
                     RefreshAll();
                 };
             }
@@ -2044,11 +2077,42 @@ namespace ExcelNavigatorPane
         private IntPtr HandleNavigationMouse(int code, IntPtr message, IntPtr data)
         {
             if (_draggingSheet) return CallNextHookEx(_mouseHook, code, message, data);
+            if (code == 0 && message.ToInt32() == 0x020A)
+            {
+                try
+                {
+                    var wheel = (MouseWheelHookData)Marshal.PtrToStructure(data, typeof(MouseWheelHookData));
+                    NavigationListBox list = IsMouseOverList(_lbWorksheets, wheel.Mouse)
+                        ? _lbWorksheets : IsMouseOverList(_lbWorkbooks, wheel.Mouse) ? _lbWorkbooks : null;
+                    if (list != null)
+                    {
+                        // Excel routes wheel input to its grid during editing; scroll without taking focus or using COM.
+                        list.ScrollWheel(unchecked((short)(wheel.MouseData >> 16)), SystemInformation.MouseWheelScrollLines);
+                        return new IntPtr(1);
+                    }
+                }
+                catch (Exception ex) { LogDebug("导航滚轮处理失败。", ex); }
+            }
             if (code == 0 && (message.ToInt32() == 0x0201 || message.ToInt32() == 0x0202))
             {
                 try
                 {
                     var mouse = (MouseHookData)Marshal.PtrToStructure(data, typeof(MouseHookData));
+                    var recentStrip = _btnRecentSheets.Owner;
+                    if (recentStrip.IsHandleCreated && _addIn?.HasRecentSheet == true &&
+                        recentStrip.RectangleToScreen(_btnRecentSheets.Bounds).Contains(mouse.Point) &&
+                        (mouse.Hwnd == recentStrip.Handle || IsChild(mouse.Hwnd, recentStrip.Handle) || IsChild(recentStrip.Handle, mouse.Hwnd)) && !IsReadyForCommands())
+                    {
+                        if (message.ToInt32() == 0x0201) _pressedRecent = true;
+                        else
+                        {
+                            bool clicked = _pressedRecent;
+                            _pressedRecent = false;
+                            if (clicked) ToggleRecentSheets();
+                        }
+                        return new IntPtr(1);
+                    }
+                    _pressedRecent = false;
                     NavigationListBox list = IsMouseOverList(_lbWorkbooks, mouse)
                         ? _lbWorkbooks : IsMouseOverList(_lbWorksheets, mouse)
                         ? _lbWorksheets : null;
@@ -2274,6 +2338,11 @@ namespace ExcelNavigatorPane
 
         private static void SelectNativeWorksheet(IntPtr hwnd, uint processId, string name)
         {
+            SelectNativeTab(FindNativeWorksheetTab(hwnd, processId, name), hwnd, processId);
+        }
+
+        private static AutomationElement FindNativeWorksheetTab(IntPtr hwnd, uint processId, string name)
+        {
             ValidateExcelWindow(hwnd, processId);
             AutomationElement root = AutomationElement.FromHandle(hwnd);
             // Proven Office 16 provider hierarchy; never search a pane's same-named ListBox items.
@@ -2288,6 +2357,11 @@ namespace ExcelNavigatorPane
                 new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem),
                 new PropertyCondition(AutomationElement.AutomationIdProperty, "SheetTab"),
                 new PropertyCondition(AutomationElement.NameProperty, name)));
+            return tab;
+        }
+
+        private static void SelectNativeTab(AutomationElement tab, IntPtr hwnd, uint processId)
+        {
             object pattern;
             if (!tab.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pattern))
                 throw new InvalidOperationException("此 Excel 版本未提供原生工作表选择动作。");
@@ -2362,37 +2436,110 @@ namespace ExcelNavigatorPane
                 () => _addIn.ToggleHiddenSheets(_workbook, this));
         }
 
-        private void ToggleRecentSheets()
+        private bool _switchingRecent;
+        internal async void ToggleRecentSheets()
         {
-            RunUserAction("无法切换最近工作表", () =>
+            if (_switchingRecent || _addIn == null) return;
+            _switchingRecent = true;
+            try
             {
-                if (string.IsNullOrEmpty(_previousSheetCodeName) && _previousWorksheet == null)
+                await RunNavigationAsync(_lbWorksheets, null, null, "无法切换最近工作表", async () =>
                 {
-                    ShowInformation("当前窗口还没有可切换的上一张工作表。");
-                    return;
-                }
-
-                Excel.Worksheet target = FindWorksheet(
-                    _previousSheetCodeName,
-                    _previousWorksheet);
-                if (target == null)
-                {
-                    _previousSheetCodeName = null;
-                    _previousWorksheet = null;
-                    UpdateRecentSheetsButton();
-                    ShowInformation("上一张工作表已不存在。");
-                    return;
-                }
-
-                if (target.Visible != Excel.XlSheetVisibility.xlSheetVisible)
-                {
-                    ShowInformation("上一张工作表当前不可见，请先显示它。");
-                    return;
-                }
-
-                ActivateWorksheetCore(target);
-            });
+                    if (IsReadyForCommands())
+                    {
+                        _addIn.SwitchRecentSheet(_app);
+                        return;
+                    }
+                    if (_addIn.IsWpsHost)
+                        throw new InvalidOperationException("WPS 公式编辑中的无提交切换尚未适配，当前输入已保留。");
+                    uint pid = _excelProcessId;
+                    RefreshAfterEdit();
+                    await _addIn.SwitchRecentNativeAsync(_windowHwnd,
+                        origin => { ReadNativeFormula(origin, pid); },
+                        (window, name) => Task.Run(() => SwitchRecentFormulaSheet(window, pid, name)));
+                });
+            }
+            finally { _switchingRecent = false; }
         }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct FormulaEditInfo
+        {
+            public int Mode, Length;
+            public IntPtr Text;
+            public int SelectionStart, SelectionEnd, Caret;
+        }
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate int PenHelper(int code, ref FormulaEditInfo info);
+        private static PenHelper _penHelper;
+        [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
+        [DllImport("kernel32.dll")] private static extern uint GetCurrentProcessId();
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr LoadLibraryEx(string file, IntPtr reserved, uint flags);
+        [DllImport("kernel32.dll", CharSet = CharSet.Ansi, ExactSpelling = true)]
+        private static extern IntPtr GetProcAddress(IntPtr module, string name);
+
+        private static string RequireFormulaText(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text) || !text.TrimStart().StartsWith("=", StringComparison.Ordinal))
+                throw new InvalidOperationException("只支持公式编辑中的切换；当前输入未提交或取消。");
+            return text;
+        }
+
+        private static string CopyFormulaEditInfo(int result, FormulaEditInfo info)
+        {
+            // In Ready mode the remaining fields are undefined; never dereference that pointer.
+            if (result != 0 || (info.Mode != 1 && info.Mode != 2 && info.Mode != 4))
+                throw new InvalidOperationException($"Excel 未确认正在编辑（结果 {result}，模式 {info.Mode}），当前输入已保留。");
+            if (info.Text == IntPtr.Zero || info.Length < 1 || info.Length > 32767)
+                throw new InvalidOperationException("Excel 编辑缓冲区不可用，当前输入已保留。");
+            return RequireFormulaText(Marshal.PtrToStringUni(info.Text, info.Length));
+        }
+
+        [System.Runtime.ExceptionServices.HandleProcessCorruptedStateExceptions]
+        [System.Security.SecurityCritical]
+        private string ReadNativeFormula(IntPtr window, uint pid)
+        {
+            if (IsDisposed || _addIn == null || _addIn.IsShuttingDown)
+                throw new InvalidOperationException("加载项正在退出，已停止切换。");
+            ValidateExcelWindow(window, pid);
+            uint owner;
+            uint thread = GetWindowThreadProcessId(window, out owner);
+            if (owner != GetCurrentProcessId() || thread != GetCurrentThreadId())
+                throw new InvalidOperationException("编辑缓冲区只能在所属 Excel 主线程读取。");
+            if (_penHelper == null)
+            {
+                string host = Process.GetCurrentProcess().MainModule.FileName;
+                if (!string.Equals(Path.GetFileName(host), "EXCEL.EXE", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("此编辑接口仅适用于 Excel。");
+                // Load only Office's own DLL; keep it loaded while the cached delegate is in use.
+                IntPtr module = LoadLibraryEx(Path.Combine(Path.GetDirectoryName(host), "XLCALL32.DLL"), IntPtr.Zero, 0x1100);
+                if (module == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "无法加载 Excel 编辑接口。");
+                IntPtr address = GetProcAddress(module, "LPenHelper");
+                if (address == IntPtr.Zero) throw new InvalidOperationException("当前 Excel 未提供 LPenHelper 编辑接口。");
+                _penHelper = (PenHelper)Marshal.GetDelegateForFunctionPointer(address, typeof(PenHelper));
+            }
+            var info = new FormulaEditInfo();
+            try { return CopyFormulaEditInfo(_penHelper(0x400E, ref info), info); }
+            catch (AccessViolationException ex)
+            {
+                throw new InvalidOperationException("Excel 编辑接口已不可用，已停止切换。", ex);
+            }
+        }
+
+        private static void SwitchRecentFormulaSheet(IntPtr target, uint pid, string name)
+        {
+            var tab = FindNativeWorksheetTab(target, pid, name);
+            ForegroundExcelWindow(target, pid);
+            SelectNativeTab(tab, target, pid);
+        }
+
+        internal bool OwnsShortcutForeground()
+        {
+            try { return GetHostFrame(_windowHwnd, _excelProcessId) == GetForegroundWindow(); }
+            catch { return false; }
+        }
+
 
         private void ShowNativeWorksheetMenu(Excel.Worksheet worksheet)
         {
@@ -2403,46 +2550,6 @@ namespace ExcelNavigatorPane
                 if (menu == null) throw new InvalidOperationException("Excel 未提供工作表标签菜单。");
                 menu.ShowPopup();
             });
-        }
-
-        private void SeedSheetHistory()
-        {
-            _currentSheetCodeName = null;
-            _previousSheetCodeName = null;
-            _currentWorksheet = null;
-            _previousWorksheet = null;
-            var activeSheet = GetSafe(() => _window?.ActiveSheet as Excel.Worksheet);
-            if (activeSheet != null && IsWorksheetInBoundWorkbook(activeSheet))
-            {
-                _currentSheetCodeName = GetWorksheetCodeName(activeSheet);
-                _currentWorksheet = activeSheet;
-            }
-
-            UpdateRecentSheetsButton();
-        }
-
-        private Excel.Worksheet FindWorksheet(string codeName, Excel.Worksheet fallback)
-        {
-            if (_workbook == null) return null;
-
-            foreach (Excel.Worksheet worksheet in _workbook.Worksheets)
-            {
-                if (!string.IsNullOrEmpty(codeName) &&
-                    string.Equals(
-                        worksheet.CodeName,
-                        codeName,
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    return worksheet;
-                }
-
-                if (fallback != null && ReferenceEquals(fallback, worksheet))
-                {
-                    return worksheet;
-                }
-            }
-
-            return null;
         }
 
         private void UpdateHiddenSheetsButton()
@@ -2463,12 +2570,12 @@ namespace ExcelNavigatorPane
                 : "取消隐藏工作表";
         }
 
-        private void UpdateRecentSheetsButton()
+        internal void UpdateRecentSheetsButton()
         {
             if (_btnRecentSheets != null)
             {
                 _btnRecentSheets.Enabled =
-                    !string.IsNullOrEmpty(_previousSheetCodeName) || _previousWorksheet != null;
+                    _addIn?.HasRecentSheet == true;
             }
         }
 
@@ -2625,8 +2732,6 @@ namespace ExcelNavigatorPane
                 _worksheetContextMenu?.Dispose();
             }
 
-            _previousWorksheet = null;
-            _currentWorksheet = null;
             _addIn = null;
             _workbook = null;
             _worksheetListWorkbook = null;
