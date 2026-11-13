@@ -1,5 +1,5 @@
 param(
-    [string]$Version = '1.0.19.0',
+    [string]$Version = '1.0.24.0',
     [ValidateSet('oneview','github')][string]$UpdateChannel = 'oneview',
     [string]$ChannelsFile = (Join-Path $PSScriptRoot 'UpdateChannels.json'),
     [string]$UpdateBaseUrl,

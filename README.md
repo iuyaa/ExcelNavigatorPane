@@ -66,8 +66,8 @@ ExcelNavigatorPane 是一个基于 VSTO、WinForms 与 Excel Interop 的 Excel �
 - 鼠标位于工作簿或工作表列表时，滚轮直接滚动对应列表，编辑时不抢焦点、不提交或取消输入；鼠标位于表格区域仍由 Excel/WPS 处理。遵循系统滚动行数或整页设置，小幅滚动累积，到达列表边界时不将滚轮传给表格。
 - 原生标签缺失、禁用、归属不明确或窗口失效时，提示错误并停止；恢复仍属于本次点击的列表选择，保留未完成公式。不会发送 Enter/Esc、模拟点击原生标签或退回 COM 激活。
 - 最近两表按钮与 Alt + ` 在 Excel 公式编辑时使用缓存的原窗口和原生工作表标签，不提交或取消公式；跨工作簿来回切换共享公式起始窗口。普通文字编辑或无法确认公式内容时拒绝切换，WPS 编辑中暂不支持。
-- 1.0.22.0 本地测试版在所属 Excel 主线程通过 Office 自带的 `XLCALL32.DLL / LPenHelper(xlGetFmlaInfo)` 只读查询编辑缓冲区，不再依赖公式栏的可访问内容。仅接受编辑模式与以 `=` 开头的输入；空闲/错误状态不解引用指针，退出或跨线程时禁止调用，UIA 切表仍在后台执行。接口契约参考 [Excel-DNA 的定义](https://github.com/Excel-DNA/ExcelDna/blob/master/Source/ExcelDna.Integration/XlCall.cs)；本次实机验收仍待完成。
-- 1.0.23.0 将公式校验固定为切换前一次：原生标签选中后立即推进最近两表历史，不在切表过渡期二次读取缓冲区。校验失败不执行切换，切换失败不推进历史；连续三次切换的离线回归通过，真实快捷键行为待验证。
+- 公式编辑时在所属 Excel 主线程通过 Office 自带的 `XLCALL32.DLL / LPenHelper(xlGetFmlaInfo)` 只读查询编辑缓冲区，不再依赖公式栏的可访问内容。仅接受编辑模式与以 `=` 开头的输入；空闲/错误状态不解引用指针，退出或跨线程时禁止调用，UIA 切表仍在后台执行。接口契约参考 [Excel-DNA 的定义](https://github.com/Excel-DNA/ExcelDna/blob/master/Source/ExcelDna.Integration/XlCall.cs)；本次实机验收仍待完成。
+- 公式校验仅发生在切换前：原生标签选中后立即推进最近两表历史，不在切表过渡期二次读取缓冲区。校验失败不执行切换，切换失败不推进历史；连续三次切换的离线回归通过，真实快捷键行为待验证。
 - 保存、重命名、保护、隐藏、右键命令、手动刷新与排序仍要求 Excel 已结束编辑且可执行命令。编辑时宿主可能直接屏蔽这些入口。
 
 ## WPS 兼容修复（1.0.3.0）
@@ -128,13 +128,13 @@ msbuild .\ExcelNavigatorPane.csproj /t:Rebuild /p:Configuration=Debug /p:Platfor
 
 ### EXE 安装包（内含 MSI）
 
-以下命令生成 `dist/releases/1.0.19.0/渠道/ExcelNavigator-Setup-1.0.19.0.exe`。用户只需一个 EXE，无需 Visual Studio。EXE 检查桌面 Excel 已安装后，按 Windows 位数选择内置 MSI；64 位包同时注册 32/64 位宿主，共享 AnyCPU 插件；缺少 .NET Framework 4.8 或 VSTO Runtime 时由微软引导程序下载依赖。
+以下命令生成 `dist/releases/1.0.24.0/渠道/ExcelNavigator-Setup-1.0.24.0.exe`。用户只需一个 EXE，无需 Visual Studio。EXE 检查桌面 Excel 已安装后，按 Windows 位数选择内置 MSI；64 位包同时注册 32/64 位宿主，共享 AnyCPU 插件；缺少 .NET Framework 4.8 或 VSTO Runtime 时由微软引导程序下载依赖。
 
 ```powershell
 # 一次性准备 WiX 构建工具；用户电脑不需要 WiX
 dotnet tool install wix --version 4.0.6 --tool-path work/tools/wix
-./installer/Build-Installer.ps1 -Version 1.0.19.0 -UpdateChannel oneview
-./installer/Build-Installer.ps1 -Version 1.0.19.0 -UpdateChannel github
+./installer/Build-Installer.ps1 -Version 1.0.24.0 -UpdateChannel oneview
+./installer/Build-Installer.ps1 -Version 1.0.24.0 -UpdateChannel github
 ```
 
 安装前保存工作并关闭所有 Excel 与 WPS 表格。MSI 需要管理员授权，将加载项安装到对应的 Program Files 目录，并写入 HKLM 加载项注册（64 位 Windows 同时写入 32/64 位视图），使用 `|vstolocal` 从本地加载。正常 Windows/VSTO 策略下，这条安装方式使用 Program Files 的信任机制，不需要用户导入自签名根证书。EXE 仍可能显示未知发布者或 Windows 安全提示，公司策略也可能限制安装。
@@ -159,8 +159,8 @@ MSI 版后续升级直接运行新版 EXE，Windows Installer 负责替换旧版
 本地检查：
 
 ```powershell
-./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.19.0/oneview -Version 1.0.19.0 -UpdateChannel oneview
-./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.19.0/github -Version 1.0.19.0 -UpdateChannel github
+./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.24.0/oneview -Version 1.0.24.0 -UpdateChannel oneview
+./tests/UpdatePublishCheck.ps1 -Directory dist/releases/1.0.24.0/github -Version 1.0.24.0 -UpdateChannel github
 python tests/RustFSPublishCheck.py
 ```
 
@@ -174,9 +174,9 @@ python tests/RustFSPublishCheck.py
 - `github`：读取公开仓库 `releases.atom`，选择其中最高版本（包含预发布），再下载对应标签的 `latest.xml` 和 EXE；仅允许 GitHub 和其 Release 资源域名的 HTTPS 重定向。私有仓库不能用于匿名客户端更新。
 - 安装包保留构建时选定的渠道。1.0.9 及更早的包均继续走 OneView，即便最初是从 GitHub 下载的；要转为 GitHub 渠道，安装一次 GitHub 渠道的新版本。不要用同版本安装包切换渠道，MSI 可能拒绝同版本替换。
 
-1.0.19.0 为内部预发布版本，完整真实升级验收尚未完成，普通修改不自动发布。用户要求“发布”时完成以下全部步骤，更新日志维护在 [CHANGELOG.md](CHANGELOG.md)：
+1.0.24.0 为内部预发布版本，完整真实升级验收尚未完成，普通修改不自动发布。用户要求“发布”时完成以下全部步骤，更新日志维护在 [CHANGELOG.md](CHANGELOG.md)：
 
-1. 确定递增版本号并整理更新日志，同步 `Properties/UpdateSettings.xml` 和 `Properties/AssemblyInfo.cs` 的 `AssemblyFileVersion`，避免 MSI 因 DLL 文件版本未增长而跳过替换。采用 `主.次.构建.0`，最后一段必须为 0；MSI 只比较前三段（最大分别为 255、255、65535）。下一版例如 1.0.20.0。
+1. 确定递增版本号并整理更新日志，同步 `Properties/UpdateSettings.xml` 和 `Properties/AssemblyInfo.cs` 的 `AssemblyFileVersion`，避免 MSI 因 DLL 文件版本未增长而跳过替换。采用 `主.次.构建.0`，最后一段必须为 0；MSI 只比较前三段（最大分别为 255、255、65535）。下一版例如 1.0.25.0。
 2. 完成相关检查，提交源码与日志并推送 GitHub；排除凭据、私钥、生成物和无关本地修改。
 3. 从该提交分别用 `-UpdateChannel oneview`、`-UpdateChannel github` 构建，沿用同一发布证书。两个渠道版本号及源码相同，但嵌入的渠道配置不同，EXE 哈希及签名清单也不同，不得混用。对各自产物运行 `tests/UpdatePublishCheck.ps1 -Directory dist/releases/版本号/渠道 -Version 版本号 -UpdateChannel 渠道`，创建并推送指向同一提交的 `v版本号` 标签。
 4. 创建 GitHub Release 草稿，上传 **github 目录**内的 EXE、SHA-256、x86/x64 MSI、安装说明、`latest.xml` 和 `update-public-key.xml`。用户默认下载 EXE；MSI 供具备运行环境的 IT 部署使用，必须选择 Windows 对应位数，先关闭 Excel、卸载旧 ClickOnce。
@@ -185,9 +185,9 @@ python tests/RustFSPublishCheck.py
 
 ```powershell
 # 默认只检查本地产物并预览，不访问 RustFS
-python installer/Publish-RustFS.py --version 1.0.19.0 --directory dist/releases/1.0.19.0/oneview
+python installer/Publish-RustFS.py --version 1.0.24.0 --directory dist/releases/1.0.24.0/oneview
 # 用户要求发布时执行，逐文件上传并校验匿名下载，入口最后更新
-python installer/Publish-RustFS.py --version 1.0.19.0 --directory dist/releases/1.0.19.0/oneview --apply
+python installer/Publish-RustFS.py --version 1.0.24.0 --directory dist/releases/1.0.24.0/oneview --apply
 ```
 
 正式更新目录为 `https://oneview.jiarui.net.cn/excel-navigation/`，S3 Endpoint 为同域名根地址，凭据保存在 Git 忽略的本机 `.env`。路由和上传账号已在 1.0.0.2 发布时验证；迁移不改变桶、账号或域名，新的入口在本版正式发布时上传。详情见 [RustFS 接入说明](installer/RustFS接入说明.md)。

@@ -182,7 +182,7 @@ namespace ExcelNavigatorPane
         // --- High-End Kutools / Fluent Palette ---
         private static readonly Color ColorExcelGreen = Color.FromArgb(33, 115, 70);
         private static readonly Color ColorBg = Color.White;
-        private static readonly Color ColorSidebar = Color.FromArgb(243, 242, 241);
+        private static readonly Color ColorSearchBg = Color.FromArgb(248, 249, 248);
         private static readonly Color ColorHover = Color.FromArgb(241, 245, 243);
         private static readonly Color ColorBorderLight = Color.FromArgb(224, 230, 226);
         private static readonly Color ColorBorderDark = Color.FromArgb(225, 223, 221);
@@ -274,8 +274,8 @@ namespace ExcelNavigatorPane
                 _workbookPanel.Padding = new Padding(Px(8), Px(4), Px(8), Px(12));
                 _lbWorksheets.Parent.Padding = new Padding(Px(8), 0, Px(8), 0);
                 _workbookSplitter.Height = Px(6);
-                _lblCounts.Parent.Height = Px(28);
-                _lblCounts.Parent.Padding = new Padding(0, 0, Px(8), 0);
+                _lblCounts.Parent.Height = Px(34);
+                _lblCounts.Parent.Padding = new Padding(0, Px(6), Px(8), 0);
                 _lblCounts.Padding = new Padding(Px(8), 0, 0, 0);
                 using (var graphics = CreateGraphics())
                     _updateLink.Width = TextRenderer.MeasureText(graphics, _updateLink.Text, _countsFont).Width + Px(8);
@@ -286,16 +286,17 @@ namespace ExcelNavigatorPane
                 {
                     strip.Font = _baseFont;
                     strip.ImageScalingSize = new Size(Px(16), Px(16));
-                    strip.Padding = strip == _txtFilter.Owner ? new Padding(Px(6), Px(5), Px(6), Px(5)) : new Padding(0, Px(5), 0, Px(5));
+                    strip.Padding = strip == _txtFilter.Owner ? new Padding(Px(6), Px(2), Px(6), Px(2)) : new Padding(0, Px(5), 0, Px(5));
                     foreach (ToolStripItem item in strip.Items)
                     {
-                        item.Margin = new Padding(Px(2), Px(1), Px(2), Px(2));
+                        item.Margin = new Padding(Px(2), Px(1), Px(2), Px(strip == _txtFilter.Owner ? 1 : 2));
                         if (item.Image?.Tag is string name) item.Image = CreateToolbarIcon(name);
                     }
                 }
                 foreach (var image in oldImages) image.Dispose();
                 _btnClearFilter.Size = new Size(Px(24), Px(24));
                 var search = _txtFilter.Owner;
+                search.Height = Px(30);
                 _txtFilter.Width = Math.Max(Px(40), search.ClientSize.Width - search.Padding.Horizontal - search.Items[0].Width - _btnClearFilter.Width - Px(12));
                 LayoutSheetCommands();
             }
@@ -696,10 +697,10 @@ namespace ExcelNavigatorPane
             _wsToolStrip.Items.AddRange(new ToolStripItem[] { _worksheetHeading, refreshWorksheets, newWorksheet, _btnListHiddenSheets });
 
             var searchStrip = new ToolStrip { Dock = DockStyle.Top, GripStyle = ToolStripGripStyle.Hidden,
-                Renderer = flatRenderer, BackColor = ColorSidebar, Padding = new Padding(6, 5, 6, 5) };
+                Renderer = flatRenderer, BackColor = ColorSearchBg, AutoSize = false, Height = 30, Padding = new Padding(6, 2, 6, 2) };
             var searchIcon = new ToolStripLabel { Image = CreateToolbarIcon("search"), DisplayStyle = ToolStripItemDisplayStyle.Image };
             _txtFilter = new ToolStripTextBox { AutoSize = false, Width = 220, BorderStyle = BorderStyle.None,
-                BackColor = ColorSidebar, Font = _baseFont, ToolTipText = "按名称筛选工作表", AccessibleName = "搜索工作表" };
+                BackColor = ColorSearchBg, Font = _baseFont, ToolTipText = "按名称筛选工作表", AccessibleName = "搜索工作表" };
             _btnClearFilter = new ToolStripButton { Image = CreateToolbarIcon("close"), DisplayStyle = ToolStripItemDisplayStyle.Image,
                 ToolTipText = "清除搜索", AccessibleName = "清除搜索", Alignment = ToolStripItemAlignment.Right,
                 AutoSize = false, Width = 24, Available = false, Overflow = ToolStripItemOverflow.Never };
@@ -758,9 +759,9 @@ namespace ExcelNavigatorPane
             var worksheetBottomPanel = new Panel
             {
                 Dock = DockStyle.Bottom,
-                Height = 28,
-                Padding = new Padding(0, 0, 8, 0),
-                BackColor = ColorSidebar
+                Height = 34,
+                Padding = new Padding(0, 6, 8, 0),
+                BackColor = ColorBg
             };
             _lblCounts = new Label
             {

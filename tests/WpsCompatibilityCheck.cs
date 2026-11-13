@@ -523,6 +523,12 @@ class WpsCompatibilityCheck
             var newSheet=ws.Items.Cast<ToolStripItem>().Single(i=>i.AccessibleName=="新建工作表");
             var refresh=ws.Items.Cast<ToolStripItem>().Single(i=>i.AccessibleName=="刷新工作表");
             Require(newSheet.Bounds.Right<=refresh.Bounds.Left && !newSheet.IsOnOverflow,"New worksheet must precede refresh");
+            var footer=(Panel)((Label)type.GetField("_lblCounts",F).GetValue(pane)).Parent;
+            Require(search.Owner.Height==(int)Math.Round(30*scale) && search.Bounds.Bottom<=search.Owner.Height,
+                "Compact search row scales without clipping text");
+            Require(footer.Height==(int)Math.Round(34*scale) && footer.Padding.Top==(int)Math.Round(6*scale) && footer.BackColor==pane.BackColor,
+                "Footer must retain an unshaded gap below the native scrollbar");
+            Require(sheets.Bottom<=footer.Top,"Worksheet scrollbar must end before footer content");
             int manual=(int)type.GetField("_manualWorkbookHeight",F).GetValue(pane);
             Call(pane,"ApplyDpiMetrics",dpi);
             Require(manual==(int)type.GetField("_manualWorkbookHeight",F).GetValue(pane),"Repeat scaling must preserve divider height");
@@ -533,6 +539,12 @@ class WpsCompatibilityCheck
                 using(var bitmap=new Bitmap(pane.Width,pane.Height)) { pane.DrawToBitmap(bitmap,new Rectangle(Point.Empty,pane.Size));bitmap.Save(Path.Combine(preview,"dpi-"+dpi+".png")); }
             }
             form.ClientSize=new Size(240,(int)(600*scale));Application.DoEvents();Call(pane,"LayoutSheetCommands");
+            search.Text="搜索内容";Application.DoEvents();
+            var clear=(ToolStripButton)type.GetField("_btnClearFilter",F).GetValue(pane);
+            Require(clear.Available && clear.Bounds.Top>=0 && clear.Bounds.Bottom<=search.Owner.Height &&
+                search.Bounds.Bottom<=search.Owner.Height && search.Owner.Height==(int)Math.Round(30*scale),
+                "Typing must not grow the compact search row or clip its clear button");
+            clear.PerformClick();Require(search.Text.Length==0,"Compact search retains clear action");
             var toggle=(ToolStripButton)type.GetField("_btnToggleHidden",F).GetValue(pane);
             var recent=(ToolStripButton)type.GetField("_btnRecentSheets",F).GetValue(pane);
             Require(toggle.Bounds.Right<=recent.Bounds.Left,"Narrow toolbar actions must not collide");
